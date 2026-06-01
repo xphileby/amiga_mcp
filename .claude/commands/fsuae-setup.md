@@ -136,6 +136,104 @@ Once devbench is running, you can edit the FS-UAE config directly from the brows
 3. The **Config** sub-tab shows devbench.toml settings (serial, emulator path, deploy dir)
 4. Below that is a **full FS-UAE config editor** with Save & Restart Emulator button
 
+## Optional: Patched FS-UAE with HTTP debugger (CPU-level inspection)
+
+The standard FS-UAE only exposes its debugger interactively via the GUI. For
+scripted / MCP-driven CPU debugging — pausing, register inspection, hardware
+breakpoints/watchpoints, disassembly, memory map — install the patched
+fork at https://github.com/geekychris/fsuae_remote_patch.
+
+What it adds (when enabled):
+- An HTTP/JSON-RPC server on `127.0.0.1:8765` (configurable) inside fs-uae
+- A "FS-UAE" tab in the devbench Web UI with live CPU regs, disasm, BP/WP
+- 27 new MCP tools (`amiga_fsuae_pause`, `amiga_fsuae_cpu`,
+  `amiga_fsuae_disasm`, `amiga_fsuae_breakpoint_add`,
+  `amiga_fsuae_watchpoint_add`, etc.) — see `mcp_fsuae.py` upstream
+- Optional in-emulator GDB stub on a second port (`FSUAE_GDB_PORT`)
+
+The patch is **off by default** in the patched binary — it only activates
+when `FSUAE_RPC_PORT` is set in the environment. Devbench sets it
+automatically based on `[fsuae_rpc]` in `devbench.toml`. Stock fs-uae
+ignores the env var, so you can leave the config enabled regardless of
+which build is installed.
+
+### Install
+
+```bash
+git clone https://github.com/geekychris/fsuae_remote_patch.git
+cd fsuae_remote_patch
+./build.sh   # ~12s on Apple Silicon; clones fs-uae v3.2.35, patches, builds
+# Binary lands at /tmp/fsuae-src/fs-uae/fs-uae (and the script copies it nearby)
+```
+
+### Wire into devbench
+
+In `devbench.toml`:
+
+```toml
+[emulator]
+# Point at the patched binary
+binary = "/path/to/fsuae_remote_patch/fs-uae"
+config = "/path/to/your/config.fs-uae"
+auto_start = true
+
+[fsuae_rpc]
+enabled = "auto"          # "auto" probes; "on" forces; "off" disables
+port = 8765
+pause_at_boot = false     # set true to pause before the first instruction runs
+gdb_port = 0              # nonzero enables the in-emulator GDB stub
+```
+
+Then `make start`. The Web UI's header gets an "RPC" badge (green = live,
+grey = probing, red = error) and a new **FS-UAE** tab appears. From MCP,
+call `amiga_fsuae_status` first to check availability before issuing other
+`amiga_fsuae_*` tools.
+
+### Verify
+
+```bash
+curl http://127.0.0.1:8765/v1/ping
+# {"ok":true,"service":"fs-uae-rpc v1"}
+curl http://127.0.0.1:3000/api/fsuae/status
+# {"status":"available","base_url":"http://127.0.0.1:8765",...}
+curl http://127.0.0.1:3000/api/emulator/status
+# {..., "configured_binary":"auto", "binary":"/tmp/fsuae-src/fs-uae", "patched":true}
+```
+
+### What you get when the patched build is active
+
+The Web UI grows a new top-level **FS-UAE** tab with four sub-tabs:
+
+| Sub-tab | What's in it |
+|---|---|
+| **CPU & Breakpoints** | Live disassembly (library-call annotation + optional source xref), CPU registers (click value to edit), CPU breakpoints with skip-count + one-shot, memory watchpoints with R/W/I + mustchange + "last hit" PC display |
+| **Memory** | Hex viewer with byte/word/longword/ASCII formats and click-a-longword-to-follow-pointer navigation (with ← back history), memory writer, memory map, stack walk |
+| **Chipset** | One-click snapshot of DMACON, INTENA/INTREQ, BPLCONx, copper / bitplane pointers, beam position |
+| **State & Symbols** | **Snapshot slots 1-9** (quick savestates with 1-9 keyboard shortcuts; Shift+N saves, N loads), snapshot diff (chunk-level via `uss_diff.py`), custom-path snapshot save/load, symbol lookup, FD library offset lookup, FD library loader |
+
+### Push events + auto-pause
+
+Devbench connects to fs-uae's `/v1/events` WebSocket and republishes frames on its own SSE bus, so the UI gets push notifications:
+
+- The FS-UAE tab auto-refreshes the moment the emulator pauses (no Refresh button needed)
+- The tab flashes amber on watchpoint fire or auto-pause
+- The auto-pause on bridge crash (`[fsuae_rpc] auto_pause_on_crash = true`) freezes the CPU at the fault moment for inspection
+
+MCP-wise, the `amiga_fsuae_*` family (27 tools) becomes useful: `amiga_fsuae_pause`, `amiga_fsuae_cpu`, `amiga_fsuae_disasm`, `amiga_fsuae_breakpoint_add`, `amiga_fsuae_watchpoint_add`, `amiga_fsuae_memmap`, `amiga_fsuae_state_save`, etc. Each tool checks RPC availability first and returns a clear "install the patched build" hint when stock fs-uae is in use, so it's always safe for the agent to attempt them.
+
+HTTP-wise, 28 routes under `/api/fsuae/*` mirror the same surface for curl / shell use.
+
+### When NOT to use
+
+If you don't need CPU-level / pre-boot / ROM debugging, the standard
+fs-uae build is fine. The bridge daemon-based debugger (`Debugger` tab,
+`amiga_debugger_*` MCP tools) already covers source-level debugging for
+your own apps. The patched build adds emulator-level visibility on top.
+
+The two debuggers complement each other and run side-by-side without interfering:
+- **Bridge debugger** — when you need source-level visibility into *your own app*
+- **FS-UAE debugger** — when you need CPU-level visibility into the *whole machine* (ROM, pre-boot, hardware state, post-crash inspection)
+
 ## Serial Connection: How It Works
 
 ```

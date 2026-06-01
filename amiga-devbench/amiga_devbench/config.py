@@ -27,8 +27,10 @@ class DevBenchConfig:
     serial_port: int = 1234
     pty_path: str = "/tmp/amiga-serial"
 
-    # Emulator
-    emulator_binary: str = "/opt/homebrew/bin/fs-uae"
+    # Emulator. `binary = "auto"` searches ~/.amiga-devbench/fs-uae,
+    # /tmp/fsuae-src/fs-uae (patched-build defaults), then falls back to
+    # `fs-uae` on PATH. Set an explicit path to override.
+    emulator_binary: str = "auto"
     emulator_config: str = "~/Documents/FS-UAE/Configurations/AmiKit-Debug.fs-uae"
     emulator_auto_start: bool = False
 
@@ -45,6 +47,17 @@ class DevBenchConfig:
 
     # GDB RSP server
     gdb_port: int = 2159
+
+    # FS-UAE Remote Debug HTTP RPC (patched fs-uae build)
+    # See https://github.com/geekychris/fsuae_remote_patch
+    # `enabled = "auto"` probes /v1/ping on startup; "on" forces; "off" disables.
+    fsuae_rpc_enabled: str = "auto"
+    fsuae_rpc_port: int = 8765
+    fsuae_rpc_pause_at_boot: bool = False
+    fsuae_gdb_port: int = 0  # 0 = disabled; nonzero enables in-emulator GDB stub
+    # When true, devbench listens for bridge `crash` events and pauses
+    # fs-uae (via /v1/pause) so the CPU state is frozen for inspection.
+    fsuae_auto_pause_on_crash: bool = True
 
     # Simulator mode
     simulator: bool = False
@@ -127,6 +140,22 @@ def _apply_toml(cfg: DevBenchConfig, data: dict[str, Any]) -> None:
     if "crash_handler_auto_enable" in bridge:
         cfg.crash_handler_auto_enable = bool(bridge["crash_handler_auto_enable"])
 
+    rpc = data.get("fsuae_rpc", {})
+    if "enabled" in rpc:
+        val = rpc["enabled"]
+        if isinstance(val, bool):
+            cfg.fsuae_rpc_enabled = "on" if val else "off"
+        else:
+            cfg.fsuae_rpc_enabled = str(val).lower()
+    if "port" in rpc:
+        cfg.fsuae_rpc_port = int(rpc["port"])
+    if "pause_at_boot" in rpc:
+        cfg.fsuae_rpc_pause_at_boot = bool(rpc["pause_at_boot"])
+    if "gdb_port" in rpc:
+        cfg.fsuae_gdb_port = int(rpc["gdb_port"])
+    if "auto_pause_on_crash" in rpc:
+        cfg.fsuae_auto_pause_on_crash = bool(rpc["auto_pause_on_crash"])
+
 
 def apply_cli_overrides(cfg: DevBenchConfig, args: Any) -> None:
     """Override config with CLI arguments (CLI takes precedence)."""
@@ -177,6 +206,16 @@ def save_config(cfg: DevBenchConfig, path: str | None = None) -> str:
         '',
         '[bridge]',
         f'crash_handler_auto_enable = {"true" if cfg.crash_handler_auto_enable else "false"}',
+        '',
+        '[fsuae_rpc]',
+        '# Remote-debug HTTP API exposed by the patched fs-uae build',
+        '# (see https://github.com/geekychris/fsuae_remote_patch). Stock fs-uae',
+        '# ignores these env vars, so leaving this enabled is safe either way.',
+        f'enabled = "{cfg.fsuae_rpc_enabled}"  # "auto" | "on" | "off"',
+        f'port = {cfg.fsuae_rpc_port}',
+        f'pause_at_boot = {"true" if cfg.fsuae_rpc_pause_at_boot else "false"}',
+        f'gdb_port = {cfg.fsuae_gdb_port}  # 0 disables the in-emulator GDB stub',
+        f'auto_pause_on_crash = {"true" if cfg.fsuae_auto_pause_on_crash else "false"}',
         '',
     ]
 

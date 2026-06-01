@@ -7,7 +7,10 @@ port = 2345
 pty_path = "/tmp/amiga-serial"
 
 [emulator]
-binary = "/opt/homebrew/bin/fs-uae"
+# "auto" prefers the patched debugger build (~/.amiga-devbench/fs-uae,
+# /tmp/fsuae-src/fs-uae) when present, else falls back to fs-uae on PATH.
+# Set to an explicit path to pin a specific binary.
+binary = "auto"
 config = "/Users/chris/Documents/FS-UAE/Configurations/AmiKit-Debug.fs-uae"
 auto_start = true
 
@@ -20,3 +23,12 @@ deploy_dir = "/Applications/AmiKit.app/Contents/SharedSupport/prefix/drive_c/Ami
 
 [bridge]
 crash_handler_auto_enable = true
+
+[fsuae_rpc]
+# Remote-debug HTTP API exposed by the patched fs-uae build
+# (see https://github.com/geekychris/fsuae_remote_patch). Stock fs-uae ignores
+# these env vars, so leaving this enabled is safe either way.
+enabled = "auto"          # "auto" | "on" | "off"
+port = 8765
+pause_at_boot = false
+gdb_port = 0              # 0 disables the in-emulator GDB stub

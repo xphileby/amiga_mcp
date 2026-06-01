@@ -20,6 +20,7 @@ from .deployer import Deployer
 from .scaffolder import create_project
 from .screenshot import save_screenshot, parse_palette
 from .copper import decode_copper_list, format_copper_list
+from .fsuae_rpc import FsuaeRpcClient
 from . import file_transfer
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ _builder: Builder | None = None
 _deployer: Deployer | None = None
 _event_bus: EventBus | None = None
 _dbg_state: DebuggerState | None = None
+_fsuae_rpc: FsuaeRpcClient | None = None
 
 mcp = FastMCP("amiga-dev")
 
@@ -41,14 +43,16 @@ def init_tools(
     builder: Builder,
     deployer: Deployer,
     event_bus: EventBus,
+    fsuae_rpc: FsuaeRpcClient | None = None,
 ) -> None:
     """Initialize module-level references for MCP tools."""
-    global _conn, _state, _builder, _deployer, _event_bus
+    global _conn, _state, _builder, _deployer, _event_bus, _fsuae_rpc
     _conn = conn
     _state = state
     _builder = builder
     _deployer = deployer
     _event_bus = event_bus
+    _fsuae_rpc = fsuae_rpc
 
 
 def _require_connected() -> tuple[SerialConnection, AmigaState, EventBus]:
@@ -2569,3 +2573,304 @@ async def amiga_backtrace(project: str | None = None) -> str:
             pass
         return f"Backtrace ({msg.get('depth', 0)} frames):\n{dbg.format_backtrace()}"
     return "No backtrace response"
+
+
+# ─── FS-UAE Native Debugger Tools (patched fs-uae only) ───
+# These wrap the HTTP RPC exposed by https://github.com/geekychris/fsuae_remote_patch
+# and operate at the *emulator* level — they can pause Kickstart ROM, set
+# hardware watchpoints, dump 68k registers, etc. — independent of the
+# AmigaBridge daemon running inside Amiga RAM. When the stock fs-uae build
+# is in use, every tool returns a clear "not available" message instead of
+# silently hanging.
+
+import json as _json
+
+
+def _rpc_unavailable() -> str:
+    """Render a uniform error explaining how to enable the patched build."""
+    if _fsuae_rpc is None:
+        return ("FS-UAE RPC client not initialized. Restart devbench after "
+                "setting [fsuae_rpc] enabled = \"on\" in devbench.toml.")
+    snap = _fsuae_rpc.snapshot()
+    return (
+        f"FS-UAE RPC not available (status={snap['status']}, "
+        f"probing {snap['base_url']}).\n"
+        "This feature requires the patched fs-uae build from "
+        "https://github.com/geekychris/fsuae_remote_patch and the "
+        "FSUAE_RPC_PORT env var set when launching. Devbench sets it "
+        "automatically when [fsuae_rpc] enabled is \"auto\" or \"on\"; "
+        "stock fs-uae ignores the env var and this feature stays disabled."
+    )
+
+
+def _rpc_render(body: dict[str, Any]) -> str:
+    """Pretty-print a JSON-RPC response."""
+    if not body.get("ok", False):
+        return f"Error: {body.get('err', 'unknown')}"
+    return _json.dumps(body, indent=2)
+
+
+@mcp.tool()
+async def amiga_fsuae_status() -> str:
+    """Get the FS-UAE remote-debug RPC status (available/unavailable/disabled).
+
+    Always succeeds. Use this to check whether the patched fs-uae build is
+    in use before calling other amiga_fsuae_* tools.
+    """
+    if _fsuae_rpc is None:
+        return "FS-UAE RPC client not initialized."
+    await _fsuae_rpc.probe()
+    return _json.dumps(_fsuae_rpc.snapshot(), indent=2)
+
+
+@mcp.tool()
+async def amiga_fsuae_pause() -> str:
+    """Pause the FS-UAE emulator (sticky — survives until amiga_fsuae_resume)."""
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.pause())
+
+
+@mcp.tool()
+async def amiga_fsuae_resume() -> str:
+    """Resume the FS-UAE emulator. Auto-rearms installed watchpoints."""
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.resume())
+
+
+@mcp.tool()
+async def amiga_fsuae_step(n: int = 1, mode: str | None = None) -> str:
+    """Step the FS-UAE CPU.
+
+    n: number of instructions (default 1)
+    mode: 'over' to step over JSR/BSR, 'out' to step until return
+    """
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.step(n=n, mode=mode))
+
+
+@mcp.tool()
+async def amiga_fsuae_reset(hard: bool = True) -> str:
+    """Reset the emulator. hard=True is power-on (RAM cleared); False is soft."""
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.reset(hard=hard))
+
+
+@mcp.tool()
+async def amiga_fsuae_cpu() -> str:
+    """Read the 68k CPU registers (D0-D7, A0-A7, PC, SR, USP, ISP). Pause first for stable read."""
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.cpu())
+
+
+@mcp.tool()
+async def amiga_fsuae_cpu_state() -> str:
+    """Check whether the emulator is paused or running."""
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.state())
+
+
+@mcp.tool()
+async def amiga_fsuae_set_register(reg: str, value: str) -> str:
+    """Write a CPU register. reg = 'd0'..'d7', 'a0'..'a7', 'pc', 'sr', 'usp', 'isp'."""
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.cpu_write(reg, value))
+
+
+@mcp.tool()
+async def amiga_fsuae_mem_read(addr: str, length: int = 64) -> str:
+    """Read emulated memory directly via fs-uae's debug memory accessor.
+
+    Unlike amiga_memory_read, this works without the bridge daemon — useful
+    for inspecting Kickstart ROM or memory during early boot. Returns hex.
+
+    addr: '0xC0' / '$C0' / '192'   length: 1..65536
+    """
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.mem_read(addr, length))
+
+
+@mcp.tool()
+async def amiga_fsuae_mem_write(addr: str, hex_bytes: str) -> str:
+    """Write bytes to emulated memory. hex_bytes is a contiguous hex string (e.g. 'DEADBEEF'). Pause first for safety."""
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.mem_write(addr, hex_bytes))
+
+
+@mcp.tool()
+async def amiga_fsuae_disasm(addr: str = "pc", count: int = 16,
+                             annotate: bool = True, library: str | None = None) -> str:
+    """Disassemble 68k instructions.
+
+    addr: 'pc' or hex/decimal address    count: 1..256 instructions
+    annotate: add 'JSR -$xxx(A6)' → 'exec.OpenLibrary()' style hints
+    library: override the preferred FD library for annotation
+    """
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    body = await _fsuae_rpc.disasm(addr=addr, count=count, annotate=annotate, library=library)
+    if not body.get("ok"):
+        return _rpc_render(body)
+    # Render lines plainly for readability
+    lines = body.get("lines") or body.get("disasm") or []
+    if isinstance(lines, list) and lines and isinstance(lines[0], dict):
+        out = []
+        for ln in lines:
+            text = ln.get("text") or f"{ln.get('addr','')}  {ln.get('bytes','')}  {ln.get('insn','')}"
+            if ln.get("annotation"):
+                text += f"   ; {ln['annotation']}"
+            out.append(text)
+        return "\n".join(out)
+    return _rpc_render(body)
+
+
+@mcp.tool()
+async def amiga_fsuae_custom() -> str:
+    """Snapshot the Amiga chipset custom registers (DMACON, INTENA/REQ, BPLCONx, copper/bitplane ptrs, beam pos)."""
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.custom())
+
+
+@mcp.tool()
+async def amiga_fsuae_memmap() -> str:
+    """Memory region map (chip/slow/fast/ROM/IO/unmapped). Read before a memory write to verify the region accepts writes."""
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.memmap())
+
+
+@mcp.tool()
+async def amiga_fsuae_stack(depth: int = 32) -> str:
+    """Read longwords from (A7) with code/data heuristic tagging. depth 1..1024."""
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.stack(depth=depth))
+
+
+@mcp.tool()
+async def amiga_fsuae_breakpoint_add(addr: str, skip: int = 0, oneshot: bool = False) -> str:
+    """Install a CPU PC breakpoint via fs-uae (independent of the bridge daemon).
+
+    Works on Kickstart ROM and pre-boot code. Up to 20 active.
+
+    skip: silently ignore the first N hits (use for high-frequency routines)
+    oneshot: auto-clear after the first fire
+    """
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.bp_add(addr, skip=skip, oneshot=oneshot))
+
+
+@mcp.tool()
+async def amiga_fsuae_breakpoint_list() -> str:
+    """List active FS-UAE breakpoints with hit counts and remaining skip counts."""
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.bp_list())
+
+
+@mcp.tool()
+async def amiga_fsuae_breakpoint_clear() -> str:
+    """Remove all FS-UAE breakpoints."""
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.bp_clear())
+
+
+@mcp.tool()
+async def amiga_fsuae_watchpoint_add(addr: str, size: int = 1, rwi: str = "RW",
+                                     mustchange: bool = False,
+                                     val: str | None = None,
+                                     valmask: str | None = None) -> str:
+    """Install a memory watchpoint. Pauses on any matching access in [addr, addr+size).
+
+    rwi: any combination of R, W, I (e.g. 'W', 'RW', 'RWI')
+    mustchange: fire only when a write actually changes the value (skip clr.l etc.)
+    val/valmask: fire only when the written value matches val under valmask
+    """
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.wp_add(
+        addr, size=size, rwi=rwi, mustchange=mustchange, val=val, valmask=valmask,
+    ))
+
+
+@mcp.tool()
+async def amiga_fsuae_watchpoint_list() -> str:
+    """List active FS-UAE watchpoints."""
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.wp_list())
+
+
+@mcp.tool()
+async def amiga_fsuae_watchpoint_last() -> str:
+    """Details (addr, PC, value) of the most recent watchpoint hit."""
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.wp_last())
+
+
+@mcp.tool()
+async def amiga_fsuae_watchpoint_clear() -> str:
+    """Remove all FS-UAE watchpoints."""
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.wp_clear())
+
+
+@mcp.tool()
+async def amiga_fsuae_state_save(path: str) -> str:
+    """Save emulator state snapshot to an absolute path (.uss file)."""
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.state_save(path))
+
+
+@mcp.tool()
+async def amiga_fsuae_state_load(path: str) -> str:
+    """Restore emulator state from an absolute path."""
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.state_load(path))
+
+
+@mcp.tool()
+async def amiga_fsuae_symbol_lookup(addr: str) -> str:
+    """Look up a well-known Amiga address (DFF000 chipset, BFExxx CIA, exception vectors)."""
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.symbol_lookup(addr))
+
+
+@mcp.tool()
+async def amiga_fsuae_fd_lookup(offset: int, library: str = "exec") -> str:
+    """Look up an AmigaOS library function by negative offset (e.g. -552 → exec.OpenLibrary)."""
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.fd_lookup(offset, library=library))
+
+
+@mcp.tool()
+async def amiga_fsuae_fd_load(path: str, library: str) -> str:
+    """Load an .fd file from disk and register it under `library` for disassembler annotation."""
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.fd_load(path, library))
+
+
+@mcp.tool()
+async def amiga_fsuae_fd_libraries() -> str:
+    """List loaded FD libraries with function counts."""
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    return _rpc_render(await _fsuae_rpc.fd_libraries())

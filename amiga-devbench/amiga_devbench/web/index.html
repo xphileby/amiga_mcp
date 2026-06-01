@@ -651,6 +651,10 @@
         <div class="emu-dot" id="emuDot" title="Emulator status"></div>
         <span id="emuText" style="font-size:11px;color:var(--text-dim);">Emu: --</span>
       </div>
+      <div id="fsuaeRpcBadge" style="display:none;align-items:center;gap:5px;" title="FS-UAE Remote Debug RPC (patched build)">
+        <div class="emu-dot" id="fsuaeRpcDot" style="background:#888;"></div>
+        <span id="fsuaeRpcText" style="font-size:11px;color:var(--text-dim);">RPC: --</span>
+      </div>
       <div style="display:flex;align-items:center;gap:5px;">
         <div class="conn-dot" id="connDot"></div>
         <span id="connText">Disconnected</span>
@@ -667,6 +671,7 @@
     <div class="tab" data-tab="inspect">Inspect</div>
     <div class="tab" data-tab="develop">Develop</div>
     <div class="tab" data-tab="debugger">Debugger</div>
+    <div class="tab" data-tab="fsuae" id="tab-fsuae" style="display:none;" title="FS-UAE native debugger (patched build only)">FS-UAE</div>
     <div class="tab" data-tab="settings">Settings</div>
   </div>
 
@@ -1714,6 +1719,14 @@
 
     <!-- Debugger -->
     <div class="tab-panel" id="panel-debugger">
+      <!-- Backend banner: clarify which backend drives this tab -->
+      <div style="background:rgba(127,255,127,0.06);border:1px solid rgba(127,255,127,0.25);border-radius:4px;padding:6px 10px;margin-bottom:8px;font-size:11px;color:var(--text-dim);">
+        <strong style="color:#7fdf7f;">Backend:</strong> Amiga Bridge daemon (serial / TCP) — source-level debugger for your own apps.
+        Requires <code style="background:var(--bg-input);padding:0 3px;border-radius:2px;">amiga-bridge</code>
+        running on the Amiga and the target attached (Launch &amp; Attach).
+        For CPU/ROM-level inspection without the bridge, use the
+        <a href="#" onclick="document.querySelector('[data-tab=fsuae]').click();return false;" style="color:#7cb7ff;">FS-UAE</a> tab (patched build only).
+      </div>
       <!-- Row 1: Target + Attach + Symbols -->
       <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;flex-wrap:wrap;">
         <input id="dbgTarget" type="text" list="dbgTargetList" placeholder="Target (task name)" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:4px 8px;font-size:12px;width:160px;">
@@ -1787,6 +1800,272 @@
       </div>
     </div>
 
+    <!-- FS-UAE Native Debugger (patched fs-uae only) -->
+    <div class="tab-panel" id="panel-fsuae">
+      <div id="fsuaeUnavailable" style="display:none;background:var(--bg-card);border:1px solid var(--border);border-radius:6px;padding:16px;font-size:13px;line-height:1.5;color:var(--text-dim);">
+        <div style="font-size:14px;font-weight:bold;color:var(--text-primary);margin-bottom:8px;">FS-UAE Remote Debug not available</div>
+        <p style="margin:0 0 8px 0;">This tab uses the HTTP/JSON-RPC API from the patched fs-uae build at
+          <a href="https://github.com/geekychris/fsuae_remote_patch" target="_blank" style="color:#7cb7ff;">geekychris/fsuae_remote_patch</a>.
+          Stock fs-uae does not expose this API.</p>
+        <p style="margin:0 0 8px 0;">To enable:</p>
+        <ol style="margin:0 0 8px 18px;padding:0;">
+          <li>Clone &amp; build the patched fork: <code style="background:var(--bg-input);padding:1px 4px;border-radius:3px;">./build.sh</code></li>
+          <li>Point <code style="background:var(--bg-input);padding:1px 4px;border-radius:3px;">[emulator] binary</code> in <code>devbench.toml</code> at the patched binary</li>
+          <li>Make sure <code style="background:var(--bg-input);padding:1px 4px;border-radius:3px;">[fsuae_rpc] enabled = "auto"</code> (devbench injects <code>FSUAE_RPC_PORT</code> on launch)</li>
+          <li>Restart devbench and the emulator</li>
+        </ol>
+        <div style="margin-top:8px;font-size:11px;">Current status: <span id="fsuaeStatusInline" style="font-family:monospace;color:var(--text-primary);">--</span></div>
+        <button class="btn" style="margin-top:8px;" onclick="fsuaeProbe()">Probe Now</button>
+      </div>
+
+      <div id="fsuaeAvailable" style="display:none;">
+        <!-- Backend banner: clarify this tab talks to the emulator, not the bridge daemon -->
+        <div style="background:rgba(124,183,255,0.08);border:1px solid rgba(124,183,255,0.3);border-radius:4px;padding:6px 10px;margin-bottom:8px;font-size:11px;color:var(--text-dim);">
+          <strong style="color:#7cb7ff;">Backend:</strong> FS-UAE HTTP RPC (port <span id="fsuaeBackendPort">8765</span>) — emulator-level debugger.
+          Works without the Amiga bridge daemon. Use this for Kickstart ROM, pre-boot code,
+          hardware-style watchpoints, or when the bridge isn't available.
+          For source-level debugging of your own apps via the bridge, use the <a href="#" onclick="document.querySelector('[data-tab=debugger]').click();return false;" style="color:#7cb7ff;">Debugger</a> tab.
+        </div>
+
+        <!-- Toolbar (shared across sub-tabs) -->
+        <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;flex-wrap:wrap;">
+          <button class="btn" onclick="fsuaePause()">&#9632; Pause</button>
+          <button class="btn" onclick="fsuaeResume()">&#9654; Resume</button>
+          <button class="btn" onclick="fsuaeStep(1)" title="Step 1 instruction">&#8615; Step</button>
+          <button class="btn" onclick="fsuaeStep(100)" title="Step 100 instructions">&#8615;&times;100</button>
+          <button class="btn" onclick="fsuaeStepMode('over')" title="Step over JSR/BSR">Step Over</button>
+          <button class="btn" onclick="fsuaeStepMode('out')" title="Step out (return)">Step Out</button>
+          <div style="border-left:1px solid var(--border);height:20px;margin:0 4px;"></div>
+          <button class="btn" onclick="fsuaeReset(true)">Hard Reset</button>
+          <button class="btn" onclick="fsuaeReset(false)">Soft Reset</button>
+          <div style="margin-left:auto;font-size:12px;">
+            State: <span id="fsuaeState" style="color:var(--text-dim);font-family:monospace;">--</span>
+            &nbsp;|&nbsp; PC: <span id="fsuaePc" style="color:var(--text-primary);font-family:monospace;">--</span>
+            <button class="btn" style="margin-left:8px;" onclick="fsuaeRefresh()">&#x21bb; Refresh</button>
+          </div>
+        </div>
+
+        <!-- Sub-tabs: CPU | Memory | Chipset | State -->
+        <div class="sub-tabs">
+          <div class="sub-tab active" data-subtab="fsuae-cpu">CPU &amp; Breakpoints</div>
+          <div class="sub-tab" data-subtab="fsuae-memory">Memory</div>
+          <div class="sub-tab" data-subtab="fsuae-chipset">Chipset</div>
+          <div class="sub-tab" data-subtab="fsuae-state">State &amp; Symbols</div>
+        </div>
+
+        <!-- Sub-panel: CPU & Breakpoints (disasm + regs + BP/WP) -->
+        <div class="sub-panel active" id="sub-fsuae-cpu">
+          <div style="display:flex;gap:10px;height:calc(100vh - 240px);">
+            <!-- Left: Disasm -->
+            <div style="flex:0 0 55%;display:flex;flex-direction:column;overflow:hidden;">
+              <div style="display:flex;gap:6px;margin-bottom:6px;align-items:center;flex-wrap:wrap;">
+                <input id="fsuaeDisasmAddr" type="text" placeholder="addr (default: pc)" value="pc" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;width:140px;">
+                <input id="fsuaeDisasmCount" type="number" value="32" min="1" max="256" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;width:60px;">
+                <button class="btn" onclick="fsuaeDisasm()" style="font-size:11px;padding:3px 8px;">Disassemble</button>
+                <label style="font-size:11px;color:var(--text-dim);" title="Annotate JSR -$xxx(A6) calls as exec.OpenLibrary() etc."><input type="checkbox" id="fsuaeAnnotate" checked> Annotate JSR</label>
+                <label style="font-size:11px;color:var(--text-dim);" title="Look up each addr in the bridge debugger's loaded symbols and show file:line"><input type="checkbox" id="fsuaeSrcXref"> Source xref</label>
+                <select id="fsuaeSrcProject" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;display:none;" title="Which project's symbols to use">
+                  <option value="">any</option>
+                </select>
+              </div>
+              <div id="fsuaeDisasmView" style="flex:1;overflow-y:auto;background:var(--bg-card);border:1px solid var(--border);border-radius:4px;font-family:monospace;font-size:12px;line-height:1.5;padding:8px;">
+                <div style="color:var(--text-dim);text-align:center;">Pause and click Disassemble to load.</div>
+              </div>
+            </div>
+
+            <!-- Right: Regs + BP/WP -->
+            <div style="flex:1;display:flex;flex-direction:column;gap:8px;overflow:hidden;">
+              <div style="flex:0 0 auto;overflow-y:auto;background:var(--bg-card);border:1px solid var(--border);border-radius:4px;padding:8px;">
+                <div style="font-size:11px;font-weight:bold;color:var(--text-dim);margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;">
+                  <span>CPU REGISTERS</span>
+                  <span style="font-weight:normal;font-style:italic;">click value to edit</span>
+                </div>
+                <div id="fsuaeRegs" style="font-family:monospace;font-size:11px;line-height:1.6;color:var(--text-dim);">Pause to view registers.</div>
+              </div>
+
+              <!-- Breakpoints -->
+              <div style="flex:0 0 auto;max-height:30%;overflow-y:auto;background:var(--bg-card);border:1px solid var(--border);border-radius:4px;padding:8px;">
+                <div style="font-size:11px;font-weight:bold;color:var(--text-dim);margin-bottom:4px;display:flex;justify-content:space-between;">
+                  <span>BREAKPOINTS (CPU)</span>
+                  <button class="btn" onclick="fsuaeBpClear()" style="font-size:10px;padding:1px 6px;">Clear All</button>
+                </div>
+                <div style="margin-bottom:6px;display:flex;gap:4px;">
+                  <input id="fsuaeBpAddr" type="text" placeholder="addr (e.g. 0xFC0234)" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;flex:1;">
+                  <input id="fsuaeBpSkip" type="number" value="0" min="0" placeholder="skip" title="Skip first N hits" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;width:50px;">
+                  <label style="font-size:11px;color:var(--text-dim);align-self:center;"><input type="checkbox" id="fsuaeBpOneshot"> 1-shot</label>
+                  <button class="btn" onclick="fsuaeBpAdd()" style="font-size:11px;padding:3px 8px;">+ BP</button>
+                </div>
+                <div id="fsuaeBpList" style="font-family:monospace;font-size:11px;color:var(--text-dim);">No breakpoints.</div>
+              </div>
+
+              <!-- Watchpoints -->
+              <div style="flex:1;overflow-y:auto;background:var(--bg-card);border:1px solid var(--border);border-radius:4px;padding:8px;">
+                <div style="font-size:11px;font-weight:bold;color:var(--text-dim);margin-bottom:4px;display:flex;justify-content:space-between;">
+                  <span>WATCHPOINTS (MEM)</span>
+                  <button class="btn" onclick="fsuaeWpClear()" style="font-size:10px;padding:1px 6px;">Clear All</button>
+                </div>
+                <div style="margin-bottom:6px;display:flex;gap:4px;flex-wrap:wrap;">
+                  <input id="fsuaeWpAddr" type="text" placeholder="addr" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;width:110px;">
+                  <input id="fsuaeWpSize" type="number" value="4" min="1" max="16777216" title="size in bytes" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;width:60px;">
+                  <select id="fsuaeWpRwi" title="Read / Write / Instruction-fetch" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;">
+                    <option value="W">W</option>
+                    <option value="R">R</option>
+                    <option value="RW" selected>RW</option>
+                    <option value="RWI">RWI</option>
+                  </select>
+                  <label style="font-size:11px;color:var(--text-dim);align-self:center;"><input type="checkbox" id="fsuaeWpMustchange" checked> mustchange</label>
+                  <button class="btn" onclick="fsuaeWpAdd()" style="font-size:11px;padding:3px 8px;">+ WP</button>
+                </div>
+                <div id="fsuaeWpList" style="font-family:monospace;font-size:11px;color:var(--text-dim);">No watchpoints.</div>
+                <div id="fsuaeWpLast" style="margin-top:6px;font-family:monospace;font-size:11px;color:#7cb7ff;"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Sub-panel: Memory (hex view + write + memmap) -->
+        <div class="sub-panel" id="sub-fsuae-memory">
+          <div style="display:flex;gap:10px;height:calc(100vh - 240px);">
+            <!-- Left: Hex view + write -->
+            <div style="flex:0 0 55%;display:flex;flex-direction:column;overflow:hidden;">
+              <div style="display:flex;gap:6px;margin-bottom:6px;align-items:center;flex-wrap:wrap;">
+                <button class="btn" onclick="fsuaeMemBack()" id="fsuaeMemBackBtn" disabled title="Back to previous address" style="font-size:11px;padding:3px 8px;">←</button>
+                <span style="font-size:11px;color:var(--text-dim);">Read:</span>
+                <input id="fsuaeMemAddr" type="text" placeholder="addr (e.g. 0x4)" value="0x0" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;width:120px;">
+                <input id="fsuaeMemLen" type="number" value="256" min="1" max="65536" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;width:70px;" title="bytes">
+                <select id="fsuaeMemFormat" onchange="fsuaeMemRead()" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;" title="display format">
+                  <option value="bytes">bytes</option>
+                  <option value="words">words</option>
+                  <option value="longs" selected>longs</option>
+                  <option value="ascii">ASCII</option>
+                </select>
+                <button class="btn" onclick="fsuaeMemRead()" style="font-size:11px;padding:3px 8px;">Read</button>
+                <span style="margin-left:auto;font-size:10px;color:var(--text-dim);">click a longword → jump to pointer</span>
+              </div>
+              <div id="fsuaeMemView" style="flex:1;overflow-y:auto;background:var(--bg-card);border:1px solid var(--border);border-radius:4px;font-family:monospace;font-size:11px;line-height:1.5;padding:8px;">
+                <div style="color:var(--text-dim);text-align:center;">Enter an address + length and click Read.</div>
+              </div>
+              <div style="margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+                <span style="font-size:11px;color:var(--text-dim);">Write:</span>
+                <input id="fsuaeMemWriteAddr" type="text" placeholder="addr" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;width:120px;">
+                <input id="fsuaeMemWriteHex" type="text" placeholder="hex bytes (e.g. DEADBEEF)" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;flex:1;">
+                <button class="btn" onclick="fsuaeMemWrite()" style="font-size:11px;padding:3px 8px;">Write</button>
+                <span style="font-size:10px;color:var(--text-dim);">pause first; unmapped/ROM writes silently no-op</span>
+              </div>
+            </div>
+
+            <!-- Right: Memory map + stack -->
+            <div style="flex:1;display:flex;flex-direction:column;gap:8px;overflow:hidden;">
+              <div style="flex:1;overflow-y:auto;background:var(--bg-card);border:1px solid var(--border);border-radius:4px;padding:8px;">
+                <div style="font-size:11px;font-weight:bold;color:var(--text-dim);margin-bottom:4px;display:flex;justify-content:space-between;">
+                  <span>MEMORY MAP</span>
+                  <button class="btn" onclick="fsuaeMemmap()" style="font-size:10px;padding:1px 6px;">&#x21bb; Refresh</button>
+                </div>
+                <div id="fsuaeMemmap" style="font-family:monospace;font-size:11px;color:var(--text-dim);">Click Refresh to load.</div>
+              </div>
+
+              <div style="flex:1;overflow-y:auto;background:var(--bg-card);border:1px solid var(--border);border-radius:4px;padding:8px;">
+                <div style="font-size:11px;font-weight:bold;color:var(--text-dim);margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;">
+                  <span>STACK (from A7)</span>
+                  <span>
+                    depth <input id="fsuaeStackDepth" type="number" value="16" min="1" max="1024" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:2px 4px;font-size:11px;width:55px;">
+                    <button class="btn" onclick="fsuaeStack()" style="font-size:10px;padding:1px 6px;">Read</button>
+                  </span>
+                </div>
+                <div id="fsuaeStackView" style="font-family:monospace;font-size:11px;color:var(--text-dim);">Pause then click Read.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Sub-panel: Chipset registers -->
+        <div class="sub-panel" id="sub-fsuae-chipset">
+          <div style="display:flex;gap:6px;margin-bottom:6px;align-items:center;">
+            <button class="btn" onclick="fsuaeCustom()" style="font-size:11px;padding:3px 8px;">&#x21bb; Refresh Chipset</button>
+            <span style="font-size:10px;color:var(--text-dim);margin-left:8px;">Snapshot of Amiga custom registers via /v1/custom — pause first for stable read.</span>
+          </div>
+          <div id="fsuaeCustomView" style="background:var(--bg-card);border:1px solid var(--border);border-radius:4px;padding:10px;font-family:monospace;font-size:12px;line-height:1.6;color:var(--text-dim);height:calc(100vh - 280px);overflow-y:auto;">
+            Click Refresh to load DMACON, INTENA/INTREQ, BPLCONx, copper/bitplane pointers, beam position.
+          </div>
+        </div>
+
+        <!-- Sub-panel: State & Symbols -->
+        <div class="sub-panel" id="sub-fsuae-state">
+          <div style="display:flex;gap:10px;height:calc(100vh - 240px);">
+            <!-- Left: State snapshots + symbol lookup -->
+            <div style="flex:0 0 50%;display:flex;flex-direction:column;gap:8px;overflow:hidden;">
+              <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:4px;padding:8px;">
+                <div style="font-size:11px;font-weight:bold;color:var(--text-dim);margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;">
+                  <span>SNAPSHOT SLOTS (.uss)</span>
+                  <button class="btn" onclick="fsuaeSlotsRefresh()" style="font-size:10px;padding:1px 6px;">&#x21bb;</button>
+                </div>
+                <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;">Quick savestates under <code style="background:var(--bg-input);padding:1px 3px;border-radius:2px;">~/.amiga-devbench/snapshots/</code>. Watchpoints + breakpoints survive load.</div>
+                <div id="fsuaeSlots" style="display:grid;grid-template-columns:auto auto auto 1fr;gap:4px 8px;align-items:center;font-family:monospace;font-size:11px;"></div>
+                <div style="margin-top:8px;display:flex;gap:4px;align-items:center;">
+                  <span style="font-size:11px;color:var(--text-dim);">Custom path:</span>
+                  <input id="fsuaeStatePath" type="text" placeholder="absolute path" value="/tmp/snap.uss" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;flex:1;">
+                  <button class="btn" onclick="fsuaeStateSave()" style="font-size:11px;padding:3px 8px;">Save</button>
+                  <button class="btn" onclick="fsuaeStateLoad()" style="font-size:11px;padding:3px 8px;">Load</button>
+                </div>
+                <div id="fsuaeStateMsg" style="margin-top:6px;font-family:monospace;font-size:11px;color:var(--text-dim);"></div>
+              </div>
+
+              <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:4px;padding:8px;">
+                <div style="font-size:11px;font-weight:bold;color:var(--text-dim);margin-bottom:4px;">SNAPSHOT DIFF</div>
+                <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;">Compare two snapshots — chunk-level via <code style="background:var(--bg-input);padding:1px 3px;border-radius:2px;">uss_diff.py</code> when the patched fork is installed, byte-summary otherwise.</div>
+                <div style="display:flex;gap:4px;align-items:center;margin-bottom:6px;flex-wrap:wrap;">
+                  <select id="fsuaeDiffA" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;flex:1;"></select>
+                  <span style="color:var(--text-dim);">vs</span>
+                  <select id="fsuaeDiffB" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;flex:1;"></select>
+                  <button class="btn" onclick="fsuaeDiff()" style="font-size:11px;padding:3px 8px;">Diff</button>
+                </div>
+                <pre id="fsuaeDiffOut" style="font-family:monospace;font-size:11px;color:var(--text-dim);max-height:200px;overflow-y:auto;margin:0;background:var(--bg-input);border-radius:3px;padding:6px;display:none;"></pre>
+              </div>
+
+              <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:4px;padding:8px;">
+                <div style="font-size:11px;font-weight:bold;color:var(--text-dim);margin-bottom:4px;">SYMBOL LOOKUP</div>
+                <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;">Built-in table: chipset regs (DFFxxx), CIA-A/B (BFExxx), 68k exception vectors.</div>
+                <div style="display:flex;gap:4px;">
+                  <input id="fsuaeSymAddr" type="text" placeholder="addr (e.g. 0xDFF096)" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;flex:1;">
+                  <button class="btn" onclick="fsuaeSymbolLookup()" style="font-size:11px;padding:3px 8px;">Lookup</button>
+                </div>
+                <div id="fsuaeSymResult" style="margin-top:6px;font-family:monospace;font-size:11px;color:var(--text-dim);"></div>
+              </div>
+
+              <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:4px;padding:8px;">
+                <div style="font-size:11px;font-weight:bold;color:var(--text-dim);margin-bottom:4px;">FD LIBRARY OFFSET LOOKUP</div>
+                <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;">Translate a negative offset (e.g. -552) to a function name. Defaults to exec.</div>
+                <div style="display:flex;gap:4px;">
+                  <input id="fsuaeFdOffset" type="number" placeholder="-552" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;width:90px;">
+                  <input id="fsuaeFdLib" type="text" placeholder="exec" value="exec" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;flex:1;">
+                  <button class="btn" onclick="fsuaeFdLookup()" style="font-size:11px;padding:3px 8px;">Lookup</button>
+                </div>
+                <div id="fsuaeFdResult" style="margin-top:6px;font-family:monospace;font-size:11px;color:var(--text-dim);"></div>
+              </div>
+            </div>
+
+            <!-- Right: FD library management -->
+            <div style="flex:1;display:flex;flex-direction:column;overflow:hidden;">
+              <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:4px;padding:8px;flex:1;overflow-y:auto;">
+                <div style="font-size:11px;font-weight:bold;color:var(--text-dim);margin-bottom:4px;display:flex;justify-content:space-between;">
+                  <span>FD LIBRARIES (for disassembler annotation)</span>
+                  <button class="btn" onclick="fsuaeFdLibraries()" style="font-size:10px;padding:1px 6px;">&#x21bb;</button>
+                </div>
+                <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;">Load .fd files to enable annotation for non-exec libraries (graphics, intuition, dos, ...).</div>
+                <div style="margin-bottom:6px;display:flex;gap:4px;">
+                  <input id="fsuaeFdPath" type="text" placeholder="abs path to .fd file" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;flex:1;">
+                  <input id="fsuaeFdName" type="text" placeholder="lib name" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;width:120px;">
+                  <button class="btn" onclick="fsuaeFdLoad()" style="font-size:11px;padding:3px 8px;">Load .fd</button>
+                </div>
+                <div id="fsuaeFdLibsList" style="font-family:monospace;font-size:11px;color:var(--text-dim);">Click refresh to list loaded libraries.</div>
+                <div id="fsuaeFdLoadMsg" style="margin-top:6px;font-family:monospace;font-size:11px;color:var(--text-dim);"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </div>
 
 <script>
@@ -1833,6 +2112,10 @@ document.getElementById('tabBar').addEventListener('click', (e) => {
     api('/clients').then(d => { if (d && d.clients) updateClients(d.clients); });
     if (typeof toolRefreshProjects === 'function') toolRefreshProjects();
   }
+  if (tabName === 'fsuae') {
+    if (typeof fsuaeProbe === 'function') fsuaeProbe();
+    if (typeof fsuaeRefresh === 'function') fsuaeRefresh();
+  }
   // Load config when switching to settings tab
   if (tabName === 'settings') {
     const activeSubTab = document.querySelector('#panel-settings .sub-tab.active');
@@ -1874,6 +2157,9 @@ document.querySelectorAll('.sub-tab').forEach(tab => {
     }
     if (subName === 'settings-traffic') {
       trafficLoad();
+    }
+    if (subName && subName.startsWith('fsuae-')) {
+      if (typeof fsuaeSubTabRefresh === 'function') fsuaeSubTabRefresh(subName);
     }
   });
 });
@@ -1983,6 +2269,44 @@ function connectSSE() {
   eventSource.addEventListener('emulator_status', (e) => {
     const data = JSON.parse(e.data);
     updateEmulatorStatus(data);
+  });
+
+  eventSource.addEventListener('fsuae_rpc_status', (e) => {
+    const data = JSON.parse(e.data);
+    updateFsuaeRpcStatus(data);
+  });
+
+  // Push notifications from fs-uae over WebSocket (relayed via SSE).
+  // The patched fork emits: paused, running, wp_hit, plus our synthetic
+  // ws_connected / ws_disconnected / auto_paused frames.
+  eventSource.addEventListener('fsuae_event', (e) => {
+    const data = JSON.parse(e.data);
+    const evt = data.event;
+    if (evt === 'paused' || evt === 'wp_hit' || evt === 'auto_paused') {
+      // Auto-refresh the FS-UAE tab when emulator becomes inspectable.
+      if (typeof fsuaeRefresh === 'function') fsuaeRefresh();
+      if (evt === 'wp_hit' || evt === 'auto_paused') {
+        // Flash the FS-UAE tab so the user notices
+        const tab = document.querySelector('[data-tab="fsuae"]');
+        if (tab) {
+          tab.style.color = '#ffd34d';
+          tab.style.fontWeight = 'bold';
+          setTimeout(() => { tab.style.color = ''; tab.style.fontWeight = ''; }, 5000);
+        }
+      }
+      if (evt === 'auto_paused') {
+        // Toast in the State message area if visible
+        const msg = document.getElementById('fsuaeStateMsg');
+        if (msg) {
+          msg.style.color = '#ffd34d';
+          msg.textContent = `auto-paused on ${data.reason}: alert=${data.alertNum || '?'} pc=${data.pc || '?'}`;
+        }
+      }
+    } else if (evt === 'running') {
+      // Nothing visible — just be aware
+    } else if (evt === 'ws_connected') {
+      // Optional: dot indicator already covers RPC live state
+    }
   });
 
   eventSource.addEventListener('crash', (e) => {
@@ -2182,6 +2506,582 @@ function updateEmulatorStatus(data) {
     uptimeEl.textContent = '--';
   }
 }
+
+// ─── FS-UAE Remote Debug RPC ───
+let _fsuaeState = { status: 'unknown', enabled: 'auto', port: 8765, base_url: '' };
+
+function updateFsuaeRpcStatus(data) {
+  _fsuaeState = data || _fsuaeState;
+  const badge = document.getElementById('fsuaeRpcBadge');
+  const dot = document.getElementById('fsuaeRpcDot');
+  const text = document.getElementById('fsuaeRpcText');
+  const tab = document.getElementById('tab-fsuae');
+  const inline = document.getElementById('fsuaeStatusInline');
+  if (inline) inline.textContent = data.status + (data.last_error ? ` (${data.last_error})` : '');
+
+  const enabled = (data.enabled || 'auto').toLowerCase();
+  if (enabled === 'off') {
+    badge.style.display = 'none';
+    if (tab) tab.style.display = 'none';
+    return;
+  }
+  badge.style.display = 'flex';
+  if (data.status === 'available') {
+    dot.style.background = 'var(--green)';
+    text.textContent = 'RPC: live';
+    if (tab) tab.style.display = '';
+    showFsuaeAvail(true);
+  } else if (data.status === 'unavailable') {
+    dot.style.background = '#888';
+    text.textContent = 'RPC: ' + (data.last_error ? 'err' : 'off');
+    // Tab stays visible (so user sees the setup hint) only if explicitly enabled
+    if (tab) tab.style.display = (enabled === 'on') ? '' : 'none';
+    showFsuaeAvail(false);
+  } else if (data.status === 'error') {
+    dot.style.background = 'var(--red)';
+    text.textContent = 'RPC: err';
+    if (tab) tab.style.display = '';
+    showFsuaeAvail(false);
+  } else if (data.status === 'disabled') {
+    badge.style.display = 'none';
+    if (tab) tab.style.display = 'none';
+  }
+}
+
+function showFsuaeAvail(avail) {
+  const a = document.getElementById('fsuaeAvailable');
+  const u = document.getElementById('fsuaeUnavailable');
+  if (!a || !u) return;
+  a.style.display = avail ? '' : 'none';
+  u.style.display = avail ? 'none' : '';
+}
+
+async function fsuaeProbe() {
+  try {
+    const r = await fetch('/api/fsuae/probe', {method:'POST'});
+    const d = await r.json();
+    updateFsuaeRpcStatus(d);
+  } catch (e) { /* shown via SSE */ }
+}
+
+async function fsuaeCall(path, opts) {
+  try {
+    const r = await fetch('/api/fsuae' + path, opts || {});
+    return await r.json();
+  } catch (e) {
+    return { ok: false, err: e.message };
+  }
+}
+
+async function fsuaePause()  { await fsuaeCall('/pause',  {method:'POST'}); fsuaeRefresh(); }
+async function fsuaeResume() { await fsuaeCall('/resume', {method:'POST'}); fsuaeRefresh(); }
+async function fsuaeStep(n)  { await fsuaeCall('/step?n=' + (n||1), {method:'POST'}); fsuaeRefresh(); }
+async function fsuaeStepMode(mode) { await fsuaeCall('/step?mode=' + mode, {method:'POST'}); fsuaeRefresh(); }
+async function fsuaeReset(hard) { await fsuaeCall('/reset?hard=' + (hard?1:0), {method:'POST'}); fsuaeRefresh(); }
+
+async function fsuaeRefresh() {
+  // Pull CPU + state in parallel
+  const [st, cpu] = await Promise.all([
+    fsuaeCall('/state'),
+    fsuaeCall('/cpu'),
+  ]);
+  document.getElementById('fsuaeState').textContent = st.ok ? st.state : '--';
+  if (cpu.ok) {
+    document.getElementById('fsuaePc').textContent = cpu.pc || '--';
+    renderFsuaeRegs(cpu);
+    // Auto-refresh disasm if paused
+    if (st.ok && st.state === 'paused') fsuaeDisasm();
+  } else {
+    document.getElementById('fsuaePc').textContent = '--';
+    document.getElementById('fsuaeRegs').innerHTML = '<span style="color:var(--text-dim)">' + (cpu.err || 'no data') + '</span>';
+  }
+  fsuaeBpRefresh();
+  fsuaeWpRefresh();
+}
+
+function renderFsuaeRegs(cpu) {
+  const reg = (name, val) => {
+    if (val == null) return `<span style="color:var(--text-dim)">${name}=--</span>`;
+    return `<span style="color:var(--text-dim)">${name}=</span>` +
+           `<span class="fsuae-reg-val" style="cursor:pointer;text-decoration:underline dotted;color:var(--text-primary);" ` +
+           `onclick="fsuaeEditRegister('${name.toLowerCase()}','${val}')" title="click to edit">${val}</span>`;
+  };
+  const getD = (i) => (cpu.d && cpu.d[i]) != null ? cpu.d[i] : cpu['d'+i];
+  const getA = (i) => (cpu.a && cpu.a[i]) != null ? cpu.a[i] : cpu['a'+i];
+  const d = [], a = [];
+  for (let i = 0; i < 8; i++) {
+    d.push(reg(`D${i}`, getD(i)));
+    a.push(reg(`A${i}`, getA(i)));
+  }
+  const rows = [
+    d.join('&nbsp;&nbsp;'),
+    a.join('&nbsp;&nbsp;'),
+    [reg('PC', cpu.pc), reg('SR', cpu.sr), reg('USP', cpu.usp), reg('ISP', cpu.isp)].join('&nbsp;&nbsp;'),
+  ];
+  document.getElementById('fsuaeRegs').innerHTML = rows.join('<br>');
+}
+
+async function fsuaeDisasm() {
+  const addr = document.getElementById('fsuaeDisasmAddr').value || 'pc';
+  const count = parseInt(document.getElementById('fsuaeDisasmCount').value, 10) || 32;
+  const annotate = document.getElementById('fsuaeAnnotate').checked ? 1 : 0;
+  const srcXref = document.getElementById('fsuaeSrcXref').checked;
+  const d = await fsuaeCall(`/disasm?addr=${encodeURIComponent(addr)}&count=${count}&annotate=${annotate}`);
+  const view = document.getElementById('fsuaeDisasmView');
+  if (!d.ok) {
+    view.innerHTML = '<span style="color:var(--red)">' + (d.err || 'error') + '</span>';
+    return;
+  }
+  const lines = d.lines || d.disasm || [];
+  if (!lines.length) { view.textContent = '(empty)'; return; }
+
+  // Optional: enrich with source xrefs from the bridge symbol system
+  let xrefs = {};
+  if (srcXref) {
+    const project = document.getElementById('fsuaeSrcProject').value;
+    const qs = (a) => `address=${encodeURIComponent(a)}` + (project ? `&project=${encodeURIComponent(project)}` : '');
+    const reqs = lines.filter(l => l && l.addr).map(l =>
+      fetch('/api/symbols/lookup?' + qs(l.addr)).then(r => r.json()).then(j => ({addr: l.addr, ann: j})).catch(() => null)
+    );
+    const results = await Promise.all(reqs);
+    for (const r of results) if (r && r.ann) xrefs[r.addr] = r.ann;
+  }
+
+  view.innerHTML = lines.map(ln => {
+    if (typeof ln === 'string') return escapeHtml(ln);
+    const text = ln.text || `${ln.addr || ''}  ${ln.bytes || ''}  ${ln.insn || ''}`;
+    const note = ln.annotation ? ` <span style="color:#7cb7ff">; ${escapeHtml(ln.annotation)}</span>` : '';
+    let xref = '';
+    if (srcXref && ln.addr) {
+      const x = xrefs[ln.addr];
+      if (x && (x.symbol || x.file)) {
+        const parts = [];
+        if (x.symbol) parts.push(`<span style="color:#7fdf7f;">${escapeHtml(x.symbol)}</span>`);
+        if (x.file)   parts.push(`<span style="color:var(--text-dim);">${escapeHtml(x.file)}:${x.line||'?'}</span>`);
+        xref = `<div style="padding-left:8px;font-size:10px;">↳ ${parts.join(' ')}</div>`;
+      }
+    }
+    return `<div>${escapeHtml(text)}${note}</div>${xref}`;
+  }).join('');
+}
+
+// Toggle the project picker visibility when source xref checkbox flips
+document.addEventListener('DOMContentLoaded', () => {
+  const cb = document.getElementById('fsuaeSrcXref');
+  if (cb) cb.addEventListener('change', async (e) => {
+    const sel = document.getElementById('fsuaeSrcProject');
+    sel.style.display = e.target.checked ? '' : 'none';
+    if (e.target.checked) {
+      try {
+        const r = await fetch('/api/symbols/loaded').then(r => r.json());
+        const projects = (r.projects || r || []).map(p => typeof p === 'string' ? p : p.project || p.name).filter(Boolean);
+        sel.innerHTML = '<option value="">(any loaded)</option>' +
+          projects.map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('');
+      } catch (e) { /* leave empty */ }
+    }
+  });
+});
+
+async function fsuaeBpAdd() {
+  const addr = document.getElementById('fsuaeBpAddr').value.trim();
+  if (!addr) return;
+  const skip = parseInt(document.getElementById('fsuaeBpSkip').value, 10) || 0;
+  const oneshot = document.getElementById('fsuaeBpOneshot').checked ? 1 : 0;
+  await fsuaeCall(`/breakpoints?addr=${encodeURIComponent(addr)}&skip=${skip}&oneshot=${oneshot}`, {method:'POST'});
+  fsuaeBpRefresh();
+}
+async function fsuaeBpClear() { await fsuaeCall('/breakpoints/clear', {method:'POST'}); fsuaeBpRefresh(); }
+async function fsuaeBpRefresh() {
+  const d = await fsuaeCall('/breakpoints');
+  const list = document.getElementById('fsuaeBpList');
+  if (!d.ok) { list.textContent = d.err || 'error'; return; }
+  const bps = d.breakpoints || [];
+  if (!bps.length) { list.innerHTML = '<span style="color:var(--text-dim)">No breakpoints.</span>'; return; }
+  list.innerHTML = bps.map(b =>
+    `<div>#${b.slot} ${b.addr} hits=${b.hit_count}${b.skip_remaining ? ' skip='+b.skip_remaining : ''}${b.oneshot ? ' [1shot]' : ''}</div>`
+  ).join('');
+}
+
+async function fsuaeWpAdd() {
+  const addr = document.getElementById('fsuaeWpAddr').value.trim();
+  if (!addr) return;
+  const size = parseInt(document.getElementById('fsuaeWpSize').value, 10) || 1;
+  const rwi = document.getElementById('fsuaeWpRwi').value;
+  const mc = document.getElementById('fsuaeWpMustchange').checked ? 1 : 0;
+  await fsuaeCall(`/watchpoints?addr=${encodeURIComponent(addr)}&size=${size}&rwi=${rwi}&mustchange=${mc}`, {method:'POST'});
+  fsuaeWpRefresh();
+}
+async function fsuaeWpClear() { await fsuaeCall('/watchpoints/clear', {method:'POST'}); fsuaeWpRefresh(); }
+async function fsuaeWpRefresh() {
+  const [d, last] = await Promise.all([
+    fsuaeCall('/watchpoints'),
+    fsuaeCall('/watchpoints/last'),
+  ]);
+  const list = document.getElementById('fsuaeWpList');
+  if (!d.ok) { list.textContent = d.err || 'error'; }
+  else {
+    const wps = d.watchpoints || [];
+    if (!wps.length) list.innerHTML = '<span style="color:var(--text-dim)">No watchpoints.</span>';
+    else list.innerHTML = wps.map(w =>
+      `<div>#${w.slot} ${w.addr}+${w.size} rwi=${w.rwi}${w.mustchange ? ' mc' : ''}</div>`
+    ).join('');
+  }
+  const lastEl = document.getElementById('fsuaeWpLast');
+  if (last && last.ok && last.hit) {
+    lastEl.textContent = `last hit: ${last.addr} pc=${last.pc} rwi=${last.rwi} size=${last.size} value=${last.value}`;
+  } else {
+    lastEl.textContent = '';
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[c]));
+}
+
+// ─── FS-UAE sub-tab: Memory ───
+const _fsuaeMemHist = [];  // address history stack for the "←" back button
+
+function fsuaeParseAddr(s) {
+  const t = String(s).trim();
+  if (/^\$/.test(t))  return parseInt(t.slice(1), 16);
+  if (/^0x/i.test(t)) return parseInt(t.slice(2), 16);
+  if (/^[0-9a-f]+$/i.test(t) && /[a-f]/i.test(t)) return parseInt(t, 16);
+  return parseInt(t, 10) || 0;
+}
+
+function fsuaeMemGoto(addrStr, pushHistory = true) {
+  const cur = document.getElementById('fsuaeMemAddr').value.trim();
+  if (pushHistory && cur && cur !== addrStr) {
+    _fsuaeMemHist.push(cur);
+    document.getElementById('fsuaeMemBackBtn').disabled = false;
+  }
+  document.getElementById('fsuaeMemAddr').value = addrStr;
+  fsuaeMemRead();
+}
+
+function fsuaeMemBack() {
+  if (!_fsuaeMemHist.length) return;
+  const prev = _fsuaeMemHist.pop();
+  document.getElementById('fsuaeMemAddr').value = prev;
+  if (!_fsuaeMemHist.length) document.getElementById('fsuaeMemBackBtn').disabled = true;
+  fsuaeMemRead();
+}
+
+async function fsuaeMemRead() {
+  const addrStr = document.getElementById('fsuaeMemAddr').value.trim() || '0x0';
+  const len = parseInt(document.getElementById('fsuaeMemLen').value, 10) || 256;
+  const fmt = document.getElementById('fsuaeMemFormat').value;
+  const d = await fsuaeCall(`/mem?addr=${encodeURIComponent(addrStr)}&len=${len}`);
+  const view = document.getElementById('fsuaeMemView');
+  if (!d.ok) { view.innerHTML = `<span style="color:var(--red)">${d.err||'error'}</span>`; return; }
+  const hex = d.hex || '';
+  if (!hex) { view.textContent = '(empty)'; return; }
+  const baseAddr = fsuaeParseAddr(d.addr || addrStr) >>> 0;
+  const bytes = [];
+  for (let i = 0; i < hex.length; i += 2) bytes.push(parseInt(hex.substr(i,2), 16));
+
+  const out = [];
+  if (fmt === 'bytes') {
+    // 16 bytes per row + ASCII
+    for (let off = 0; off < bytes.length; off += 16) {
+      const row = bytes.slice(off, off + 16);
+      const cols = row.map(b => b.toString(16).padStart(2,'0')).join(' ').padEnd(48);
+      const ascii = row.map(b => (b >= 0x20 && b < 0x7f) ? String.fromCharCode(b) : '.').join('');
+      const a = ((baseAddr + off) >>> 0).toString(16).padStart(8,'0');
+      out.push(`${a}  ${cols}  ${escapeHtml(ascii)}`);
+    }
+  } else if (fmt === 'words') {
+    // 8 words per row (16 bytes), big-endian
+    for (let off = 0; off < bytes.length; off += 16) {
+      const row = bytes.slice(off, off + 16);
+      const parts = [];
+      for (let i = 0; i + 1 < row.length; i += 2) {
+        parts.push(((row[i] << 8) | row[i+1]).toString(16).padStart(4,'0'));
+      }
+      const a = ((baseAddr + off) >>> 0).toString(16).padStart(8,'0');
+      out.push(`${a}  ${parts.join(' ')}`);
+    }
+  } else if (fmt === 'longs') {
+    // 4 longs per row (16 bytes) — clickable to follow pointer
+    for (let off = 0; off < bytes.length; off += 16) {
+      const row = bytes.slice(off, off + 16);
+      const parts = [];
+      for (let i = 0; i + 3 < row.length; i += 4) {
+        const v = ((row[i] << 24) | (row[i+1] << 16) | (row[i+2] << 8) | row[i+3]) >>> 0;
+        const hex8 = v.toString(16).padStart(8,'0');
+        parts.push(`<span class="fsuae-mem-long" style="cursor:pointer;text-decoration:underline dotted;color:var(--text-primary);" onclick="fsuaeMemGoto('0x${hex8}')" title="follow pointer">${hex8}</span>`);
+      }
+      const a = ((baseAddr + off) >>> 0).toString(16).padStart(8,'0');
+      out.push(`<span style="color:var(--text-dim);">${a}</span>  ${parts.join('  ')}`);
+    }
+  } else { // ascii
+    // 32 chars per row
+    for (let off = 0; off < bytes.length; off += 32) {
+      const row = bytes.slice(off, off + 32);
+      const txt = row.map(b => (b >= 0x20 && b < 0x7f) ? String.fromCharCode(b) : '·').join('');
+      const a = ((baseAddr + off) >>> 0).toString(16).padStart(8,'0');
+      out.push(`<span style="color:var(--text-dim);">${a}</span>  ${escapeHtml(txt)}`);
+    }
+  }
+  view.innerHTML = `<pre style="margin:0;">${out.join('\n')}</pre>`;
+}
+
+async function fsuaeMemWrite() {
+  const addr = document.getElementById('fsuaeMemWriteAddr').value.trim();
+  const hex = document.getElementById('fsuaeMemWriteHex').value.trim().replace(/\s+/g,'');
+  if (!addr || !hex) return;
+  const d = await fsuaeCall(`/mem?addr=${encodeURIComponent(addr)}&hex=${encodeURIComponent(hex)}`, {method:'POST'});
+  const view = document.getElementById('fsuaeMemView');
+  if (d.ok) {
+    view.innerHTML = `<div style="color:var(--green)">wrote ${hex.length/2} bytes to ${addr}</div>` + view.innerHTML;
+    // refresh the read view if it's showing nearby memory
+    fsuaeMemRead();
+  } else {
+    view.innerHTML = `<div style="color:var(--red)">write failed: ${d.err}</div>` + view.innerHTML;
+  }
+}
+
+async function fsuaeMemmap() {
+  const d = await fsuaeCall('/memmap');
+  const view = document.getElementById('fsuaeMemmap');
+  if (!d.ok) { view.innerHTML = `<span style="color:var(--red)">${d.err||'error'}</span>`; return; }
+  const regions = d.regions || [];
+  if (!regions.length) { view.textContent = '(empty)'; return; }
+  const kindColor = (k) => ({
+    chipram:'#7fdfff', ram:'#7fff7f', rom:'#ffaa7f', romin:'#ffaa7f',
+    io:'#ff7fff', cia:'#ff7fff', unmapped:'#666', unknown:'#999',
+  })[k] || 'var(--text-primary)';
+  let html = `<div style="font-size:10px;color:var(--text-dim);margin-bottom:4px;">${d.address_space_bits || 24}-bit address space</div>`;
+  for (const r of regions) {
+    if (r.kind === 'unmapped') continue;  // skip noise
+    const color = kindColor(r.kind);
+    html += `<div style="padding:2px 0;"><span style="color:${color};">${r.kind.padEnd(8)}</span> ${r.start}-${r.end}  <span style="color:var(--text-dim);">${r.name || r.label || ''}</span></div>`;
+  }
+  view.innerHTML = html;
+}
+
+async function fsuaeStack() {
+  const depth = parseInt(document.getElementById('fsuaeStackDepth').value, 10) || 16;
+  const d = await fsuaeCall(`/stack?depth=${depth}`);
+  const view = document.getElementById('fsuaeStackView');
+  if (!d.ok) { view.innerHTML = `<span style="color:var(--red)">${d.err||'error'}</span>`; return; }
+  const words = d.words || [];
+  if (!words.length) { view.textContent = '(empty — pause emulator first)'; return; }
+  let html = `<div style="color:var(--text-dim);margin-bottom:4px;">SP = ${d.sp}</div>`;
+  for (const w of words) {
+    const tagColor = w.kind === 'code' ? '#7cb7ff' : 'var(--text-dim)';
+    html += `<div>+${String(w.offset).padStart(3)}  ${w.addr}  ${w.value}  <span style="color:${tagColor};">[${w.kind}]</span></div>`;
+  }
+  view.innerHTML = html;
+}
+
+// ─── FS-UAE sub-tab: Chipset ───
+async function fsuaeCustom() {
+  const d = await fsuaeCall('/custom');
+  const view = document.getElementById('fsuaeCustomView');
+  if (!d.ok) { view.innerHTML = `<span style="color:var(--red)">${d.err||'error'}</span>`; return; }
+  // The /v1/custom response is a flat dict of register name → hex value.
+  // Group by area for readability.
+  const groups = {
+    'DMA / Interrupts': ['dmaconr','intenar','intreqr'],
+    'Bitplane / Display': ['bplcon0','bplcon1','bplcon2','bplcon3','bpl1mod','bpl2mod','ddfstrt','ddfstop','diwstrt','diwstop'],
+    'Bitplane pointers': ['bpl1pth','bpl1ptl','bpl2pth','bpl2ptl','bpl3pth','bpl3ptl','bpl4pth','bpl4ptl','bpl5pth','bpl5ptl','bpl6pth','bpl6ptl'],
+    'Copper': ['cop1lch','cop1lcl','cop2lch','cop2lcl','copjmp1','copjmp2'],
+    'Beam position': ['vposr','vhposr','vposw','vhposw'],
+  };
+  const entries = Object.entries(d).filter(([k,v]) => k !== 'ok' && typeof v !== 'object');
+  const used = new Set();
+  let html = '';
+  for (const [groupName, keys] of Object.entries(groups)) {
+    let groupHtml = '';
+    for (const k of keys) {
+      if (d[k] !== undefined) {
+        groupHtml += `<div style="display:inline-block;margin-right:14px;"><span style="color:var(--text-dim);">${k.toUpperCase()}</span>=<span style="color:#7cb7ff;">${d[k]}</span></div>`;
+        used.add(k);
+      }
+    }
+    if (groupHtml) {
+      html += `<div style="margin-bottom:10px;"><div style="font-size:10px;font-weight:bold;color:var(--text-dim);margin-bottom:3px;">${groupName.toUpperCase()}</div>${groupHtml}</div>`;
+    }
+  }
+  // Anything not in our groups, list as Other
+  const others = entries.filter(([k]) => !used.has(k));
+  if (others.length) {
+    let g = '';
+    for (const [k, v] of others) g += `<div style="display:inline-block;margin-right:14px;"><span style="color:var(--text-dim);">${k.toUpperCase()}</span>=<span style="color:#7cb7ff;">${v}</span></div>`;
+    html += `<div><div style="font-size:10px;font-weight:bold;color:var(--text-dim);margin-bottom:3px;">OTHER</div>${g}</div>`;
+  }
+  view.innerHTML = html || '(no chipset data)';
+}
+
+// ─── FS-UAE sub-tab: State & Symbols ───
+// Snapshot slots — quick-save/load to numbered files under ~/.amiga-devbench/snapshots/.
+async function fsuaeSlotsRefresh() {
+  const d = await fetch('/api/fsuae/snapshot/list').then(r => r.json()).catch(() => null);
+  const div = document.getElementById('fsuaeSlots');
+  if (!d || !d.ok) { div.textContent = '(error loading slot list)'; return; }
+  const fmt = (s) => {
+    if (!s.mtime) return '<span style="color:var(--text-dim);">empty</span>';
+    const dt = new Date(s.mtime * 1000);
+    const kb = (s.size / 1024).toFixed(0);
+    return `<span style="color:var(--text-primary);">${kb} KB</span> <span style="color:var(--text-dim);">${dt.toLocaleString()}</span>`;
+  };
+  div.innerHTML = d.slots.map(s => `
+    <span style="color:var(--text-dim);">Slot ${s.slot}</span>
+    <button class="btn" onclick="fsuaeSlotSave(${s.slot})" style="font-size:10px;padding:1px 8px;">Save</button>
+    <button class="btn" onclick="fsuaeSlotLoad(${s.slot})" ${s.mtime ? '' : 'disabled'} style="font-size:10px;padding:1px 8px;">Load</button>
+    <span>${fmt(s)}</span>
+  `).join('');
+  // Populate diff dropdowns from filled slots
+  const opts = '<option value="">(pick a snapshot)</option>' +
+    d.slots.filter(s => s.mtime).map(s => `<option value="slot-${s.slot}">Slot ${s.slot}</option>`).join('');
+  document.getElementById('fsuaeDiffA').innerHTML = opts;
+  document.getElementById('fsuaeDiffB').innerHTML = opts;
+}
+
+async function fsuaeSlotSave(n) {
+  const msg = document.getElementById('fsuaeStateMsg');
+  msg.style.color = 'var(--text-dim)';
+  msg.textContent = `saving slot ${n}...`;
+  const d = await fsuaeCall(`/snapshot/slot/${n}/save`, {method:'POST'});
+  msg.style.color = d.ok ? 'var(--green)' : 'var(--red)';
+  msg.textContent = d.ok ? `saved slot ${n} → ${d.path}` : `error: ${d.err}`;
+  if (d.ok) fsuaeSlotsRefresh();
+}
+
+async function fsuaeSlotLoad(n) {
+  const msg = document.getElementById('fsuaeStateMsg');
+  msg.style.color = 'var(--text-dim)';
+  msg.textContent = `loading slot ${n}...`;
+  const d = await fsuaeCall(`/snapshot/slot/${n}/load`, {method:'POST'});
+  msg.style.color = d.ok ? 'var(--green)' : 'var(--red)';
+  msg.textContent = d.ok ? `loaded slot ${n}` : `error: ${d.err}`;
+  if (d.ok) fsuaeRefresh();
+}
+
+async function fsuaeDiff() {
+  const a = document.getElementById('fsuaeDiffA').value;
+  const b = document.getElementById('fsuaeDiffB').value;
+  const out = document.getElementById('fsuaeDiffOut');
+  if (!a || !b) { out.style.display = 'block'; out.textContent = 'pick two snapshots first'; return; }
+  out.style.display = 'block';
+  out.textContent = 'diffing...';
+  const d = await fetch(`/api/fsuae/snapshot/diff?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`).then(r => r.json()).catch(e => ({ok:false, err:e.message}));
+  if (!d.ok) { out.textContent = `error: ${d.err}`; return; }
+  const header = `[via ${d.via}]\n\n`;
+  out.textContent = header + (d.output || JSON.stringify(d, null, 2));
+}
+
+async function fsuaeStateSave() {
+  const path = document.getElementById('fsuaeStatePath').value.trim();
+  if (!path) return;
+  const d = await fsuaeCall(`/state/save?path=${encodeURIComponent(path)}`, {method:'POST'});
+  const msg = document.getElementById('fsuaeStateMsg');
+  msg.style.color = d.ok ? 'var(--green)' : 'var(--red)';
+  msg.textContent = d.ok ? `saved to ${path}` : `error: ${d.err}`;
+}
+
+async function fsuaeStateLoad() {
+  const path = document.getElementById('fsuaeStatePath').value.trim();
+  if (!path) return;
+  const d = await fsuaeCall(`/state/load?path=${encodeURIComponent(path)}`, {method:'POST'});
+  const msg = document.getElementById('fsuaeStateMsg');
+  msg.style.color = d.ok ? 'var(--green)' : 'var(--red)';
+  msg.textContent = d.ok ? `loaded ${path}` : `error: ${d.err}`;
+  if (d.ok) fsuaeRefresh();
+}
+
+async function fsuaeSymbolLookup() {
+  const addr = document.getElementById('fsuaeSymAddr').value.trim();
+  if (!addr) return;
+  const d = await fsuaeCall(`/symbols/lookup?addr=${encodeURIComponent(addr)}`);
+  const out = document.getElementById('fsuaeSymResult');
+  if (!d.ok) { out.style.color = 'var(--red)'; out.textContent = d.err || 'error'; return; }
+  if (d.name) {
+    out.style.color = 'var(--green)';
+    out.innerHTML = `<span style="color:#7cb7ff;">${escapeHtml(d.name)}</span>` +
+                    (d.description ? `<div style="color:var(--text-dim);margin-top:2px;">${escapeHtml(d.description)}</div>` : '');
+  } else {
+    out.style.color = 'var(--text-dim)';
+    out.textContent = `no symbol at ${addr}`;
+  }
+}
+
+async function fsuaeFdLookup() {
+  const offsetStr = document.getElementById('fsuaeFdOffset').value;
+  const lib = document.getElementById('fsuaeFdLib').value.trim() || 'exec';
+  if (!offsetStr) return;
+  const d = await fsuaeCall(`/fd/lookup?offset=${encodeURIComponent(offsetStr)}&library=${encodeURIComponent(lib)}`);
+  const out = document.getElementById('fsuaeFdResult');
+  if (!d.ok) { out.style.color = 'var(--red)'; out.textContent = d.err || 'error'; return; }
+  if (d.name) {
+    out.style.color = 'var(--green)';
+    out.innerHTML = `<span style="color:#7cb7ff;">${escapeHtml(d.library)}.${escapeHtml(d.name)}()</span> at offset ${d.offset}`;
+  } else {
+    out.style.color = 'var(--text-dim)';
+    out.textContent = `no function at offset ${offsetStr} in ${lib}`;
+  }
+}
+
+async function fsuaeFdLoad() {
+  const path = document.getElementById('fsuaeFdPath').value.trim();
+  const lib = document.getElementById('fsuaeFdName').value.trim();
+  const msg = document.getElementById('fsuaeFdLoadMsg');
+  if (!path || !lib) { msg.style.color = 'var(--red)'; msg.textContent = 'need path and library name'; return; }
+  const d = await fsuaeCall(`/fd/load?path=${encodeURIComponent(path)}&library=${encodeURIComponent(lib)}`, {method:'POST'});
+  if (d.ok) {
+    msg.style.color = 'var(--green)';
+    msg.textContent = `loaded ${d.functions || '?'} functions into ${d.library || lib}`;
+    fsuaeFdLibraries();
+  } else {
+    msg.style.color = 'var(--red)';
+    msg.textContent = `error: ${d.err}`;
+  }
+}
+
+async function fsuaeFdLibraries() {
+  const d = await fsuaeCall('/fd/libraries');
+  const list = document.getElementById('fsuaeFdLibsList');
+  if (!d.ok) { list.innerHTML = `<span style="color:var(--red)">${d.err||'error'}</span>`; return; }
+  const libs = d.libraries || [];
+  if (!libs.length) { list.innerHTML = '<span style="color:var(--text-dim)">No FD libraries loaded.</span>'; return; }
+  list.innerHTML = libs.map(l =>
+    `<div>${escapeHtml(l.name)} — ${l.functions} fns${l.builtin ? ' <span style="color:var(--text-dim)">[builtin]</span>' : ''}</div>`
+  ).join('');
+}
+
+// Inline-edit a CPU register: click value → prompt for new value → POST /cpu/write.
+async function fsuaeEditRegister(reg, currentValue) {
+  const newVal = prompt(`Set ${reg.toUpperCase()} (currently ${currentValue}):`, currentValue);
+  if (newVal === null || newVal === currentValue) return;
+  const d = await fsuaeCall(`/cpu/write?reg=${encodeURIComponent(reg)}&value=${encodeURIComponent(newVal)}`, {method:'POST'});
+  if (d.ok) fsuaeRefresh();
+  else alert(`write failed: ${d.err}`);
+}
+
+// Auto-load chipset / memmap / stack / slots when their sub-tab becomes active.
+function fsuaeSubTabRefresh(subName) {
+  if (subName === 'fsuae-memory') {
+    fsuaeMemmap();
+  } else if (subName === 'fsuae-chipset') {
+    fsuaeCustom();
+  } else if (subName === 'fsuae-state') {
+    fsuaeSlotsRefresh();
+  }
+}
+
+// Keyboard shortcuts on the FS-UAE tab: 1-9 to save (with Shift) / load (no Shift).
+// Only active while the FS-UAE tab is the current top-level tab and no input has focus.
+document.addEventListener('keydown', (e) => {
+  if (!/^[1-9]$/.test(e.key)) return;
+  const onFsuaeTab = document.querySelector('#panel-fsuae')?.classList.contains('active');
+  if (!onFsuaeTab) return;
+  const ae = document.activeElement;
+  if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT')) return;
+  const slot = parseInt(e.key, 10);
+  if (e.shiftKey) fsuaeSlotSave(slot);
+  else fsuaeSlotLoad(slot);
+});
 
 async function emuStart() {
   document.getElementById('emuMsg').textContent = 'Starting emulator...';
@@ -5178,6 +6078,11 @@ async function init() {
   }, 3000);
   // Load emulator status
   emuRefresh();
+  // Load fs-uae rpc status (sets badge + tab visibility)
+  try {
+    const fs = await fetch('/api/fsuae/status').then(r => r.json());
+    updateFsuaeRpcStatus(fs);
+  } catch (e) { /* badge stays hidden */ }
   // Populate debugger dropdowns
   dbgRefreshTargets();
   dbgRefreshProjects();

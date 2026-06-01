@@ -26,6 +26,7 @@ from .config import DevBenchConfig
 from .deployer import Deployer
 from . import file_transfer
 from .emulator import EmulatorManager
+from .fsuae_rpc import FsuaeRpcClient
 from .mcp_tools import mcp, init_tools
 from .persistent_log import PersistentLog
 from .protocol import format_hex_dump, level_name
@@ -51,6 +52,24 @@ _plog: PersistentLog | None = None
 _dbg_state: DebuggerState | None = None
 _dbg_stepping = False  # True while step/next is in progress (blocks other serial commands)
 _gdb_server: GDBServer | None = None
+_fsuae_rpc: FsuaeRpcClient | None = None
+
+
+def _build_fsuae_env(cfg: DevBenchConfig) -> dict[str, str]:
+    """Env-var overlay for the FS-UAE subprocess.
+
+    Stock fs-uae ignores these vars, so this is safe regardless of build.
+    The patched build (geekychris/fsuae_remote_patch) exposes its HTTP RPC
+    when FSUAE_RPC_PORT is set.
+    """
+    env: dict[str, str] = {}
+    if cfg.fsuae_rpc_enabled.lower() in ("auto", "on") and cfg.fsuae_rpc_port:
+        env["FSUAE_RPC_PORT"] = str(cfg.fsuae_rpc_port)
+        if cfg.fsuae_rpc_pause_at_boot:
+            env["FSUAE_RPC_PAUSE_AT_BOOT"] = "1"
+    if cfg.fsuae_gdb_port:
+        env["FSUAE_GDB_PORT"] = str(cfg.fsuae_gdb_port)
+    return env
 
 
 # ─── Web API Routes ───
@@ -72,11 +91,16 @@ async def api_events(request: Request) -> EventSourceResponse:
         if _emulator:
             yield {"event": "emulator_status", "data": json.dumps(_emulator.get_status())}
 
+        # Initial fsuae-rpc snapshot so the UI can render the badge immediately
+        if _fsuae_rpc:
+            yield {"event": "fsuae_rpc_status", "data": json.dumps(_fsuae_rpc.snapshot())}
+
         async with _event_bus.subscribe("log", "heartbeat", "var", "connected",
                                         "disconnected", "clients", "tasks", "dir",
                                         "emulator_status", "crash", "snoop",
                                         "test", "taildata", "port_conflict",
-                                        "dbg_stop", "dbg_running", "dbg_detached") as queue:
+                                        "dbg_stop", "dbg_running", "dbg_detached",
+                                        "fsuae_rpc_status", "fsuae_event") as queue:
             while True:
                 try:
                     evt, data = await asyncio.wait_for(queue.get(), timeout=30.0)
@@ -147,6 +171,10 @@ async def api_events(request: Request) -> EventSourceResponse:
                         if _dbg_state:
                             _dbg_state.reset()
                         yield {"event": "dbg_detached", "data": "{}"}
+                    elif evt == "fsuae_rpc_status":
+                        yield {"event": "fsuae_rpc_status", "data": json.dumps(data)}
+                    elif evt == "fsuae_event":
+                        yield {"event": "fsuae_event", "data": json.dumps(data)}
 
                 except asyncio.TimeoutError:
                     # Send keepalive comment
@@ -962,7 +990,7 @@ async def serve_static(request: Request) -> Response:
 
 def create_app(args: Any, cfg: DevBenchConfig | None = None) -> Starlette:
     """Create the Starlette application with MCP + Web API + static files."""
-    global _conn, _state, _event_bus, _builder, _deployer, _emulator, _config, _traffic, _plog, _dbg_state, _gdb_server
+    global _conn, _state, _event_bus, _builder, _deployer, _emulator, _config, _traffic, _plog, _dbg_state, _gdb_server, _fsuae_rpc
 
     _state = AmigaState()
     _dbg_state = DebuggerState()
@@ -1014,12 +1042,23 @@ def create_app(args: Any, cfg: DevBenchConfig | None = None) -> Starlette:
             binary=cfg.emulator_binary,
             config_file=cfg.emulator_config,
             event_bus=_event_bus,
+            extra_env=_build_fsuae_env(cfg),
         )
     else:
         _emulator = EmulatorManager(event_bus=_event_bus)
 
+    # FS-UAE remote-debug HTTP client (no-op against stock fs-uae)
+    if cfg:
+        _fsuae_rpc = FsuaeRpcClient(
+            port=cfg.fsuae_rpc_port,
+            enabled=cfg.fsuae_rpc_enabled,
+            event_bus=_event_bus,
+        )
+    else:
+        _fsuae_rpc = FsuaeRpcClient(event_bus=_event_bus)
+
     # Initialize MCP tools with shared state
-    init_tools(_conn, _state, _builder, _deployer, _event_bus)
+    init_tools(_conn, _state, _builder, _deployer, _event_bus, fsuae_rpc=_fsuae_rpc)
 
     # Get the MCP session manager (triggers lazy init)
     _mcp_app_inner = mcp.streamable_http_app()
@@ -1073,6 +1112,19 @@ def create_app(args: Any, cfg: DevBenchConfig | None = None) -> Starlette:
                 print(f"  Simulator:     running on port {_sim_port}")
             if _emulator and _emulator.is_running:
                 print(f"  Emulator:      running (pid {_emulator.pid})")
+
+            # Start fs-uae-rpc availability poller (no-op against stock fs-uae)
+            if _fsuae_rpc:
+                _fsuae_rpc.start_poller()
+                # One immediate probe so /api/status has a result right away
+                await _fsuae_rpc.probe()
+                snap = _fsuae_rpc.snapshot()
+                if snap["status"] == "available":
+                    print(f"  FS-UAE RPC:    {snap['base_url']} ({snap.get('service', 'v1')})")
+                elif snap["status"] == "disabled":
+                    pass  # silent — user opted out
+                else:
+                    print(f"  FS-UAE RPC:    probing {snap['base_url']} (currently {snap['status']})")
 
             # Start GDB RSP server
             _gdb_port = cfg.gdb_port if cfg and hasattr(cfg, 'gdb_port') else 2159
@@ -1138,6 +1190,38 @@ def create_app(args: Any, cfg: DevBenchConfig | None = None) -> Starlette:
 
             dbg_listener_task = asyncio.ensure_future(_dbg_state_listener())
 
+            # Background: auto-pause fs-uae when the bridge reports a crash,
+            # so the CPU state is frozen at the fault moment instead of
+            # continuing past the alert. Opt out via
+            # [fsuae_rpc] auto_pause_on_crash = false.
+            _auto_pause = cfg.fsuae_auto_pause_on_crash if cfg else True
+
+            async def _crash_auto_pauser():
+                async with _event_bus.subscribe("crash") as queue:
+                    while True:
+                        try:
+                            _evt, data = await queue.get()
+                            if not _auto_pause or not _fsuae_rpc or not _fsuae_rpc.available:
+                                continue
+                            logger.info("Auto-pausing fs-uae on bridge crash event")
+                            try:
+                                await _fsuae_rpc.pause()
+                                # Surface as a fsuae_event so the UI can react
+                                _event_bus.publish("fsuae_event", {
+                                    "event": "auto_paused",
+                                    "reason": "bridge_crash",
+                                    "alertNum": data.get("alertNum"),
+                                    "pc": data.get("pc"),
+                                })
+                            except Exception as e:
+                                logger.warning("Auto-pause failed: %s", e)
+                        except asyncio.CancelledError:
+                            break
+                        except Exception as e:
+                            logger.error("Error in crash auto-pause handler: %s", e)
+
+            crash_pause_task = asyncio.ensure_future(_crash_auto_pauser())
+
             # Start persistent event logger
             if _plog:
                 _plog.start(_event_bus)
@@ -1146,10 +1230,13 @@ def create_app(args: Any, cfg: DevBenchConfig | None = None) -> Starlette:
 
             ready_task.cancel()
             dbg_listener_task.cancel()
+            crash_pause_task.cancel()
 
             # Shutdown
             if _gdb_server:
                 await _gdb_server.stop()
+            if _fsuae_rpc:
+                await _fsuae_rpc.aclose()
             if _plog:
                 _plog.stop()
             if _conn:
@@ -2608,6 +2695,330 @@ def create_app(args: Any, cfg: DevBenchConfig | None = None) -> Starlette:
         _emulator.write_config(content)
         return JSONResponse({"status": "saved", "path": _emulator._config_file})
 
+    # ─── FS-UAE Remote-Debug RPC Endpoints ───
+    # All endpoints return {"ok": ...} pass-through from the patched fs-uae
+    # build, or {"ok": False, "err": "fsuae-rpc not available"} when the
+    # stock binary is in use.
+
+    async def api_fsuae_status(request: Request) -> JSONResponse:
+        if not _fsuae_rpc:
+            return JSONResponse({"status": "disabled", "enabled": "off"})
+        return JSONResponse(_fsuae_rpc.snapshot())
+
+    async def api_fsuae_probe(request: Request) -> JSONResponse:
+        if not _fsuae_rpc:
+            return JSONResponse({"ok": False, "err": "fsuae-rpc client not initialized"})
+        await _fsuae_rpc.probe()
+        return JSONResponse(_fsuae_rpc.snapshot())
+
+    def _require_rpc() -> JSONResponse | None:
+        if not _fsuae_rpc:
+            return JSONResponse({"ok": False, "err": "fsuae-rpc client not initialized"})
+        if not _fsuae_rpc.available:
+            snap = _fsuae_rpc.snapshot()
+            return JSONResponse({
+                "ok": False,
+                "err": f"fsuae-rpc not available (status={snap['status']}). "
+                       "Launch the patched fs-uae build with FSUAE_RPC_PORT set, "
+                       "or see https://github.com/geekychris/fsuae_remote_patch",
+            })
+        return None
+
+    async def api_fsuae_cpu(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        return JSONResponse(await _fsuae_rpc.cpu())
+
+    async def api_fsuae_state(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        return JSONResponse(await _fsuae_rpc.state())
+
+    async def api_fsuae_pause(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        return JSONResponse(await _fsuae_rpc.pause())
+
+    async def api_fsuae_resume(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        return JSONResponse(await _fsuae_rpc.resume())
+
+    async def api_fsuae_step(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        n = int(request.query_params.get("n", "1"))
+        mode = request.query_params.get("mode")
+        return JSONResponse(await _fsuae_rpc.step(n=n, mode=mode))
+
+    async def api_fsuae_reset(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        hard = request.query_params.get("hard", "1") != "0"
+        return JSONResponse(await _fsuae_rpc.reset(hard=hard))
+
+    async def api_fsuae_mem(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        if request.method == "POST":
+            addr = request.query_params.get("addr", "")
+            hex_bytes = request.query_params.get("hex", "")
+            if not addr or not hex_bytes:
+                return JSONResponse({"ok": False, "err": "missing addr or hex"})
+            return JSONResponse(await _fsuae_rpc.mem_write(addr, hex_bytes))
+        addr = request.query_params.get("addr", "")
+        length = int(request.query_params.get("len", "64"))
+        if not addr:
+            return JSONResponse({"ok": False, "err": "missing addr"})
+        return JSONResponse(await _fsuae_rpc.mem_read(addr, length))
+
+    async def api_fsuae_disasm(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        addr = request.query_params.get("addr", "pc")
+        count = int(request.query_params.get("count", "16"))
+        annotate = request.query_params.get("annotate", "1") != "0"
+        library = request.query_params.get("library")
+        return JSONResponse(await _fsuae_rpc.disasm(addr=addr, count=count,
+                                                    annotate=annotate, library=library))
+
+    async def api_fsuae_custom(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        return JSONResponse(await _fsuae_rpc.custom())
+
+    async def api_fsuae_memmap(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        return JSONResponse(await _fsuae_rpc.memmap())
+
+    async def api_fsuae_stack(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        depth = int(request.query_params.get("depth", "32"))
+        return JSONResponse(await _fsuae_rpc.stack(depth=depth))
+
+    async def api_fsuae_breakpoints(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        if request.method == "GET":
+            return JSONResponse(await _fsuae_rpc.bp_list())
+        addr = request.query_params.get("addr", "")
+        if not addr:
+            return JSONResponse({"ok": False, "err": "missing addr"})
+        skip = int(request.query_params.get("skip", "0"))
+        oneshot = request.query_params.get("oneshot", "0") != "0"
+        return JSONResponse(await _fsuae_rpc.bp_add(addr, skip=skip, oneshot=oneshot))
+
+    async def api_fsuae_breakpoints_clear(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        return JSONResponse(await _fsuae_rpc.bp_clear())
+
+    async def api_fsuae_watchpoints(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        if request.method == "GET":
+            return JSONResponse(await _fsuae_rpc.wp_list())
+        addr = request.query_params.get("addr", "")
+        if not addr:
+            return JSONResponse({"ok": False, "err": "missing addr"})
+        size = int(request.query_params.get("size", "1"))
+        rwi = request.query_params.get("rwi", "RW")
+        mustchange = request.query_params.get("mustchange", "0") != "0"
+        val = request.query_params.get("val")
+        valmask = request.query_params.get("valmask")
+        return JSONResponse(await _fsuae_rpc.wp_add(
+            addr, size=size, rwi=rwi, mustchange=mustchange, val=val, valmask=valmask,
+        ))
+
+    async def api_fsuae_watchpoints_clear(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        return JSONResponse(await _fsuae_rpc.wp_clear())
+
+    async def api_fsuae_watchpoints_last(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        return JSONResponse(await _fsuae_rpc.wp_last())
+
+    async def api_fsuae_state_save(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        path = request.query_params.get("path", "")
+        if not path:
+            return JSONResponse({"ok": False, "err": "missing path"})
+        return JSONResponse(await _fsuae_rpc.state_save(path))
+
+    async def api_fsuae_state_load(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        path = request.query_params.get("path", "")
+        if not path:
+            return JSONResponse({"ok": False, "err": "missing path"})
+        return JSONResponse(await _fsuae_rpc.state_load(path))
+
+    async def api_fsuae_symbol_lookup(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        addr = request.query_params.get("addr", "")
+        if not addr:
+            return JSONResponse({"ok": False, "err": "missing addr"})
+        return JSONResponse(await _fsuae_rpc.symbol_lookup(addr))
+
+    async def api_fsuae_fd_libraries(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        return JSONResponse(await _fsuae_rpc.fd_libraries())
+
+    async def api_fsuae_fd_lookup(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        try:
+            offset = int(request.query_params.get("offset", "0"))
+        except ValueError:
+            return JSONResponse({"ok": False, "err": "bad offset"})
+        library = request.query_params.get("library", "exec")
+        return JSONResponse(await _fsuae_rpc.fd_lookup(offset, library=library))
+
+    async def api_fsuae_fd_load(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        path = request.query_params.get("path", "")
+        library = request.query_params.get("library", "")
+        if not path or not library:
+            return JSONResponse({"ok": False, "err": "missing path or library"})
+        return JSONResponse(await _fsuae_rpc.fd_load(path, library))
+
+    async def api_fsuae_cpu_write(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        reg = request.query_params.get("reg", "")
+        value = request.query_params.get("value", "")
+        if not reg or value == "":
+            return JSONResponse({"ok": False, "err": "missing reg or value"})
+        return JSONResponse(await _fsuae_rpc.cpu_write(reg, value))
+
+    # ─── Snapshot management ───
+    # Slot-based wrapper around state_save/load — file paths are managed for
+    # the user under ~/.amiga-devbench/snapshots/slot-{N}.uss. Plus a diff
+    # endpoint that shells out to fsuae_remote_patch/tools/uss_diff.py if
+    # we can find it, so users can compare two snapshots without leaving the UI.
+
+    _SNAPSHOT_DIR = Path.home() / ".amiga-devbench" / "snapshots"
+
+    def _slot_path(slot: int) -> Path:
+        return _SNAPSHOT_DIR / f"slot-{slot}.uss"
+
+    def _find_uss_diff_tool() -> str | None:
+        """Locate fsuae_remote_patch/tools/uss_diff.py. We don't ship our own
+        diff because the .uss format is complex chunk-IFF — better to delegate."""
+        candidates = [
+            Path.home() / ".amiga-devbench" / "fsuae_remote_patch" / "tools" / "uss_diff.py",
+            Path.home() / "code" / "fsuae_remote_patch" / "tools" / "uss_diff.py",
+            Path("/Users/chris/code/claude_world/fsuae_remote_patch/tools/uss_diff.py"),
+            Path("/tmp/fsuae-src/uss_diff.py"),
+        ]
+        for c in candidates:
+            if c.is_file():
+                return str(c)
+        return None
+
+    async def api_fsuae_snapshot_list(request: Request) -> JSONResponse:
+        _SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        slots = []
+        for n in range(1, 10):
+            p = _slot_path(n)
+            if p.exists():
+                stat = p.stat()
+                slots.append({
+                    "slot": n,
+                    "path": str(p),
+                    "size": stat.st_size,
+                    "mtime": stat.st_mtime,
+                })
+            else:
+                slots.append({"slot": n, "path": str(p), "size": 0, "mtime": None})
+        return JSONResponse({"ok": True, "dir": str(_SNAPSHOT_DIR), "slots": slots})
+
+    async def api_fsuae_snapshot_slot(request: Request) -> JSONResponse:
+        err = _require_rpc()
+        if err: return err
+        try:
+            slot = int(request.path_params.get("slot", "0"))
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "err": "bad slot"})
+        if not (1 <= slot <= 9):
+            return JSONResponse({"ok": False, "err": "slot must be 1..9"})
+        action = request.path_params.get("action", "")
+        _SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        path = str(_slot_path(slot))
+        if action == "save":
+            r = await _fsuae_rpc.state_save(path)
+            r["slot"] = slot; r["path"] = path
+            return JSONResponse(r)
+        elif action == "load":
+            if not _slot_path(slot).exists():
+                return JSONResponse({"ok": False, "err": f"slot {slot} is empty"})
+            r = await _fsuae_rpc.state_load(path)
+            r["slot"] = slot; r["path"] = path
+            return JSONResponse(r)
+        return JSONResponse({"ok": False, "err": "action must be save or load"})
+
+    async def api_fsuae_snapshot_diff(request: Request) -> JSONResponse:
+        a = request.query_params.get("a", "")
+        b = request.query_params.get("b", "")
+        if not a or not b:
+            return JSONResponse({"ok": False, "err": "need ?a=path&b=path"})
+        # Allow slot-N shorthand for convenience
+        for label, val in (("a", a), ("b", b)):
+            if val.startswith("slot-") and val[5:].isdigit():
+                if label == "a":
+                    a = str(_slot_path(int(val[5:])))
+                else:
+                    b = str(_slot_path(int(val[5:])))
+        if not Path(a).exists() or not Path(b).exists():
+            return JSONResponse({"ok": False, "err": f"snapshot not found: {a if not Path(a).exists() else b}"})
+
+        tool = _find_uss_diff_tool()
+        if tool:
+            # Delegate to uss_diff.py — it understands the .uss chunk format.
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "python3", tool, a, b,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+                return JSONResponse({
+                    "ok": proc.returncode == 0,
+                    "via": "uss_diff.py",
+                    "tool": tool,
+                    "output": stdout.decode("utf-8", "replace"),
+                    "error": stderr.decode("utf-8", "replace") if stderr else "",
+                    "a": a, "b": b,
+                })
+            except Exception as e:
+                return JSONResponse({"ok": False, "err": f"uss_diff.py failed: {e}"})
+
+        # Fallback: dumb byte-level summary. Useful indicator, not authoritative.
+        import hashlib
+        def _summarize(p: str) -> dict:
+            data = Path(p).read_bytes()
+            return {
+                "path": p,
+                "size": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+        sum_a, sum_b = _summarize(a), _summarize(b)
+        return JSONResponse({
+            "ok": True,
+            "via": "byte-summary (uss_diff.py not found in expected paths)",
+            "a": sum_a, "b": sum_b,
+            "identical": sum_a["sha256"] == sum_b["sha256"],
+            "size_delta": sum_b["size"] - sum_a["size"],
+            "hint": "install fsuae_remote_patch in ~/.amiga-devbench/ or ~/code/ for a structural diff",
+        })
+
     async def api_devbench_config_get(request: Request) -> JSONResponse:
         if not _config:
             return JSONResponse({"error": "No config loaded"})
@@ -2633,6 +3044,13 @@ def create_app(args: Any, cfg: DevBenchConfig | None = None) -> Starlette:
             },
             "bridge": {
                 "crash_handler_auto_enable": _config.crash_handler_auto_enable,
+            },
+            "fsuae_rpc": {
+                "enabled": _config.fsuae_rpc_enabled,
+                "port": _config.fsuae_rpc_port,
+                "pause_at_boot": _config.fsuae_rpc_pause_at_boot,
+                "gdb_port": _config.fsuae_gdb_port,
+                "auto_pause_on_crash": _config.fsuae_auto_pause_on_crash,
             },
         })
 
@@ -2661,6 +3079,21 @@ def create_app(args: Any, cfg: DevBenchConfig | None = None) -> Starlette:
         bridge = body.get("bridge", {})
         if "crash_handler_auto_enable" in bridge:
             _config.crash_handler_auto_enable = bool(bridge["crash_handler_auto_enable"])
+        rpc = body.get("fsuae_rpc", {})
+        if "enabled" in rpc:
+            val = rpc["enabled"]
+            if isinstance(val, bool):
+                _config.fsuae_rpc_enabled = "on" if val else "off"
+            else:
+                _config.fsuae_rpc_enabled = str(val).lower()
+        if "port" in rpc:
+            _config.fsuae_rpc_port = int(rpc["port"])
+        if "pause_at_boot" in rpc:
+            _config.fsuae_rpc_pause_at_boot = bool(rpc["pause_at_boot"])
+        if "gdb_port" in rpc:
+            _config.fsuae_gdb_port = int(rpc["gdb_port"])
+        if "auto_pause_on_crash" in rpc:
+            _config.fsuae_auto_pause_on_crash = bool(rpc["auto_pause_on_crash"])
         # Save to file
         from .config import save_config
         path = save_config(_config)
@@ -4349,6 +4782,35 @@ def create_app(args: Any, cfg: DevBenchConfig | None = None) -> Starlette:
         Route("/api/emulator/restart", api_emulator_restart, methods=["POST"]),
         Route("/api/emulator/config", api_emulator_config_get, methods=["GET"]),
         Route("/api/emulator/config", api_emulator_config_save, methods=["POST"]),
+        # FS-UAE remote-debug RPC (patched fs-uae only; degrades gracefully)
+        Route("/api/fsuae/status", api_fsuae_status, methods=["GET"]),
+        Route("/api/fsuae/probe", api_fsuae_probe, methods=["POST"]),
+        Route("/api/fsuae/cpu", api_fsuae_cpu, methods=["GET"]),
+        Route("/api/fsuae/state", api_fsuae_state, methods=["GET"]),
+        Route("/api/fsuae/pause", api_fsuae_pause, methods=["POST"]),
+        Route("/api/fsuae/resume", api_fsuae_resume, methods=["POST"]),
+        Route("/api/fsuae/step", api_fsuae_step, methods=["POST"]),
+        Route("/api/fsuae/reset", api_fsuae_reset, methods=["POST"]),
+        Route("/api/fsuae/mem", api_fsuae_mem, methods=["GET", "POST"]),
+        Route("/api/fsuae/disasm", api_fsuae_disasm, methods=["GET"]),
+        Route("/api/fsuae/custom", api_fsuae_custom, methods=["GET"]),
+        Route("/api/fsuae/memmap", api_fsuae_memmap, methods=["GET"]),
+        Route("/api/fsuae/stack", api_fsuae_stack, methods=["GET"]),
+        Route("/api/fsuae/breakpoints", api_fsuae_breakpoints, methods=["GET", "POST"]),
+        Route("/api/fsuae/breakpoints/clear", api_fsuae_breakpoints_clear, methods=["POST"]),
+        Route("/api/fsuae/watchpoints", api_fsuae_watchpoints, methods=["GET", "POST"]),
+        Route("/api/fsuae/watchpoints/clear", api_fsuae_watchpoints_clear, methods=["POST"]),
+        Route("/api/fsuae/watchpoints/last", api_fsuae_watchpoints_last, methods=["GET"]),
+        Route("/api/fsuae/state/save", api_fsuae_state_save, methods=["POST"]),
+        Route("/api/fsuae/state/load", api_fsuae_state_load, methods=["POST"]),
+        Route("/api/fsuae/cpu/write", api_fsuae_cpu_write, methods=["POST"]),
+        Route("/api/fsuae/snapshot/list", api_fsuae_snapshot_list, methods=["GET"]),
+        Route("/api/fsuae/snapshot/slot/{slot}/{action}", api_fsuae_snapshot_slot, methods=["POST"]),
+        Route("/api/fsuae/snapshot/diff", api_fsuae_snapshot_diff, methods=["GET"]),
+        Route("/api/fsuae/symbols/lookup", api_fsuae_symbol_lookup, methods=["GET"]),
+        Route("/api/fsuae/fd/libraries", api_fsuae_fd_libraries, methods=["GET"]),
+        Route("/api/fsuae/fd/lookup", api_fsuae_fd_lookup, methods=["GET"]),
+        Route("/api/fsuae/fd/load", api_fsuae_fd_load, methods=["POST"]),
         # DevBench config
         Route("/api/config", api_devbench_config_get, methods=["GET"]),
         Route("/api/config", api_devbench_config_save, methods=["POST"]),

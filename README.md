@@ -9,6 +9,55 @@ with Claude Code.
 
 ---
 
+## One-line install
+
+Brew-style installer — fetches the source, installs the Python host server, pulls the m68k Docker cross-compiler, builds the bridge daemon + examples, and launches the web UI on http://localhost:3000. Re-running pulls the latest commit and rebuilds in place.
+
+**macOS / Linux:**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/geekychris/amiga_mcp/main/scripts/install.sh | bash
+```
+
+**Windows (PowerShell):**
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/geekychris/amiga_mcp/main/scripts/install.ps1 | iex
+```
+
+The installer requires `git`, `python>=3.10`, and Docker. On mac/Linux you can opt into auto-install of missing CLI tools with `AMIGA_MCP_AUTO_INSTALL=1`. Docker Desktop on macOS/Windows needs a GUI install regardless.
+
+**What it does NOT install:** FS-UAE itself (you need a Kickstart ROM — see [FS-UAE Emulator Setup](#fs-uae-emulator-setup)). The optional [patched fs-uae fork](https://github.com/geekychris/fsuae_remote_patch) with the HTTP debugger is opt-in via `AMIGA_MCP_BUILD_PATCHED=1` (Linux + macOS). DevBench works fine with stock fs-uae either way; the patched build unlocks the **FS-UAE** tab in the Web UI and the `amiga_fsuae_*` MCP tools.
+
+**Knobs** (env vars before invoking):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AMIGA_MCP_SRC` | `$HOME/.amiga-devbench/src` | Where to clone the repo |
+| `AMIGA_MCP_REF` | `main` | Git ref to check out |
+| `AMIGA_MCP_REPO` | `https://github.com/geekychris/amiga_mcp.git` | Remote |
+| `AMIGA_MCP_BUILD` | `1` | Build examples via Docker (`0` to skip) |
+| `AMIGA_MCP_START` | `1` | Launch web UI in background (`0` to install only) |
+| `AMIGA_MCP_OPEN` | `1` | Open browser when ready (`0` to suppress) |
+| `AMIGA_MCP_AUTO_INSTALL` | `0` | (mac/Linux) `1` to brew/apt/dnf install missing deps |
+| `AMIGA_MCP_BUILD_PATCHED` | `0` | (mac/Linux) `1` to clone+build the patched fs-uae fork into `~/.amiga-devbench/fs-uae`. Combine with `AMIGA_MCP_AUTO_INSTALL=1` to also install the ~10 system libs it needs. Takes ~10 min. |
+
+### How devbench picks the fs-uae binary
+
+`[emulator] binary` in `devbench.toml` accepts the literal `"auto"` (default). When `auto`, devbench searches in order:
+
+1. `$AMIGA_MCP_FSUAE_BIN` env var
+2. `~/.amiga-devbench/fs-uae` (installed by `AMIGA_MCP_BUILD_PATCHED=1`)
+3. `/tmp/fsuae-src/fs-uae` (default output path of the patched fork's `build.sh`)
+4. `~/code/fsuae_remote_patch/fs-uae` (common dev checkout)
+5. `fs-uae` on `PATH` (stock build from Homebrew / apt / etc.)
+
+It prefers the patched build when found (probed by scanning the binary for the `fs-uae-rpc` service string). Set `binary` to an explicit path to pin a specific build. Check `/api/emulator/status` (`patched: true|false`) or the devbench startup log to confirm which one was selected.
+
+The web UI runs in the background under `$HOME/.amiga-devbench/run/devbench.pid` with logs in `$HOME/.amiga-devbench/logs/`. Stop with `kill $(cat ~/.amiga-devbench/run/devbench.pid)` (or `Stop-Process` on Windows).
+
+---
+
 ## Table of Contents
 
 1. [Overview](#overview)
@@ -913,6 +962,67 @@ Claude Code with `amiga_set_var("ball_color", "1")`.
 
 ---
 
+## Two debuggers: when to use which
+
+DevBench exposes two independent debuggers, each with its own UI tab, MCP tool family, and HTTP API. They're complementary — pick the one that matches what you're trying to inspect.
+
+### Bridge debugger — "what is my app doing?"
+
+**UI tab:** `Debugger` &nbsp;&nbsp; **MCP prefix:** `amiga_debugger_*` &nbsp;&nbsp; **API prefix:** `/api/debugger/*`
+
+Talks to the `amiga-bridge` daemon running in Amiga RAM, over the serial link (TCP or PTY). Source-level: knows about your symbols, lines, locals, call stack. Drives one of your processes via `Launch & Attach`.
+
+**Best for:**
+- Stepping through your own C functions line by line
+- Reading local variables and walking the call stack of your task
+- Breaking at function names or source lines
+- Watching variables you registered with `ab_register_var()`
+
+**Limitations:**
+- Requires the bridge daemon to be running and your app to be attached
+- Bridge dies if the OS hangs / crashes / hasn't booted yet
+- Can't see inside Kickstart ROM or other tasks
+- No hardware-level watchpoints (limited to bridge-instrumented stops)
+
+### FS-UAE native debugger — "what is the emulator doing?"
+
+**UI tab:** `FS-UAE` &nbsp;&nbsp; **MCP prefix:** `amiga_fsuae_*` &nbsp;&nbsp; **API prefix:** `/api/fsuae/*`
+
+Talks to the patched [fs-uae build](https://github.com/geekychris/fsuae_remote_patch) over HTTP. Emulator-level: pauses the 68k CPU itself, sees every memory access, every cycle. No bridge daemon needed.
+
+**Best for:**
+- "Who keeps clobbering `$DFF180`?" — hardware-style watchpoints with R/W/I and mustchange
+- Inspecting Kickstart ROM, exception vectors, CIA registers
+- Pre-boot debugging (set BP at reset vector, single-step from instruction zero)
+- Debugging when the OS has hung — bridge is dead but fs-uae is fine
+- Decoding chipset state (DMACON / INTENA / BPLCONx / copper pointers / beam pos)
+
+**Limitations:**
+- Requires the patched fs-uae build (Linux + macOS only; Windows compiles to a no-op stub)
+- No source-line mapping — addresses only
+- Stock fs-uae from Homebrew/apt doesn't expose this API; the tab stays hidden
+
+### Side-by-side
+
+| Capability | Bridge | FS-UAE |
+|---|---|---|
+| Pause / step / continue | ✓ | ✓ |
+| Source-level (file:line, locals, backtrace) | ✓ | — |
+| Function-name breakpoints (via symbol load) | ✓ | by address only |
+| Hardware-style watchpoints (R/W/I, mustchange) | — | ✓ |
+| Read Kickstart ROM | — | ✓ |
+| Read/write 68k regs (D0-D7, A0-A7, PC, SR, USP, ISP) | partial (task ctx) | ✓ (live CPU) |
+| Memory map (chip/fast/ROM/IO/unmapped) | — | ✓ |
+| Chipset register snapshot | partial (inspector) | ✓ |
+| State snapshot save/load (.uss) | — | ✓ |
+| Works when OS has crashed | — | ✓ |
+| Works without bridge running | — | ✓ |
+| Works on Windows | ✓ | — (patched build is mac/linux only) |
+
+You can mix them: set a hardware watchpoint with the FS-UAE debugger to find *where* something happens, then attach the bridge debugger to step through the surrounding source. The two run side-by-side without interfering.
+
+---
+
 ## MCP Tools Reference
 
 All tools are available through Claude Code when connected to the MCP server.
@@ -1172,6 +1282,121 @@ are maintained server-side across sessions.
 |---|---|---|
 | `amiga_create_project` | `name`, `template?` | Create new example project (window/screen/headless) |
 | `amiga_run` | `project`, `command?` | Deploy and launch (skip build) |
+
+### FS-UAE Native Debugger (`amiga_fsuae_*`)
+
+Tools that talk to the patched fs-uae HTTP RPC. These work at the *emulator* level — no bridge daemon required. All return JSON; each tool returns a clear "fsuae-rpc not available — install the patched build" error when stock fs-uae is in use, so the agent can probe without hanging.
+
+Always call `amiga_fsuae_status` first to confirm the patched build is detected and the RPC is reachable.
+
+| Tool | Parameters | Description |
+|---|---|---|
+| **Plumbing** | | |
+| `amiga_fsuae_status` | — | Probe `/v1/ping`, return availability + service version |
+| **Execution control** | | |
+| `amiga_fsuae_pause` | — | Stop the emulator (sticky) |
+| `amiga_fsuae_resume` | — | Resume; auto-rearms watchpoints |
+| `amiga_fsuae_step` | `n?`, `mode?` | Step N instructions, or `mode='over'` / `mode='out'` |
+| `amiga_fsuae_reset` | `hard?` | Hard (RAM-clear) or soft reset |
+| `amiga_fsuae_cpu_state` | — | running / paused |
+| **CPU** | | |
+| `amiga_fsuae_cpu` | — | All registers (D0-D7, A0-A7, PC, SR, USP, ISP) |
+| `amiga_fsuae_set_register` | `reg`, `value` | Write any register |
+| **Memory** | | |
+| `amiga_fsuae_mem_read` | `addr`, `length?` | Read up to 64K via fs-uae's debug accessor (works on ROM) |
+| `amiga_fsuae_mem_write` | `addr`, `hex_bytes` | Write hex bytes (pause first) |
+| `amiga_fsuae_memmap` | — | Region map: chip/fast/ROM/IO/unmapped |
+| `amiga_fsuae_stack` | `depth?` | Read longwords from (A7) with code/data tagging |
+| **Disassembly** | | |
+| `amiga_fsuae_disasm` | `addr?`, `count?`, `annotate?`, `library?` | Disassemble with library-call annotation |
+| **Breakpoints (CPU-level)** | | |
+| `amiga_fsuae_breakpoint_add` | `addr`, `skip?`, `oneshot?` | Add BP (up to 20). Works on Kickstart ROM. |
+| `amiga_fsuae_breakpoint_list` | — | List with hit counts |
+| `amiga_fsuae_breakpoint_clear` | — | Remove all |
+| **Watchpoints (memory)** | | |
+| `amiga_fsuae_watchpoint_add` | `addr`, `size?`, `rwi?`, `mustchange?`, `val?`, `valmask?` | Hardware-style watchpoint (up to 20) |
+| `amiga_fsuae_watchpoint_list` | — | List active |
+| `amiga_fsuae_watchpoint_last` | — | Last hit: addr, PC, value, rwi |
+| `amiga_fsuae_watchpoint_clear` | — | Remove all |
+| **Chipset & symbols** | | |
+| `amiga_fsuae_custom` | — | DMACON, INTENA/REQ, BPLCONx, copper/bitplane ptrs, beam pos |
+| `amiga_fsuae_symbol_lookup` | `addr` | Built-in table: chipset, CIA, 68k vectors |
+| `amiga_fsuae_fd_load` | `path`, `library` | Load `.fd` file for disassembler annotation |
+| `amiga_fsuae_fd_lookup` | `offset`, `library?` | Translate negative offset → function name |
+| `amiga_fsuae_fd_libraries` | — | List loaded FD libraries |
+| **State snapshots** | | |
+| `amiga_fsuae_state_save` | `path` | Save `.uss` snapshot |
+| `amiga_fsuae_state_load` | `path` | Restore `.uss` snapshot |
+
+#### Common recipes
+
+```python
+# "Who is clobbering my sprite pointer?"
+amiga_fsuae_pause()
+amiga_fsuae_watchpoint_add(addr="0xC0", size=4, rwi="W", mustchange=True)
+amiga_fsuae_resume()
+# ... let it run until WP fires ...
+amiga_fsuae_watchpoint_last()  # → triggering PC + value
+amiga_fsuae_disasm(addr="<that PC>", count=8, annotate=True)
+
+# "What does Kickstart do between FC0000 and the first JSR?"
+amiga_fsuae_reset(hard=True)
+amiga_fsuae_pause()
+amiga_fsuae_breakpoint_add(addr="0xFC0000")
+amiga_fsuae_resume()
+# ... pauses at first instruction of ROM ...
+amiga_fsuae_step(n=1)
+amiga_fsuae_cpu()
+amiga_fsuae_disasm(count=16, annotate=True)
+
+# "Stop on the 1000th call to CopyMem"
+result = amiga_fsuae_fd_lookup(offset=-624)  # CopyMem
+# ExecBase + offset → address (use amiga_fsuae_mem_read of $4 to get ExecBase)
+amiga_fsuae_breakpoint_add(addr="<CopyMem addr>", skip=999)
+amiga_fsuae_resume()
+```
+
+### REST API for fs-uae debugger
+
+The same operations are available as HTTP endpoints for shell-script / curl use:
+
+```sh
+# Status / control
+curl     http://localhost:3000/api/fsuae/status
+curl -X POST http://localhost:3000/api/fsuae/pause
+curl -X POST 'http://localhost:3000/api/fsuae/step?mode=over'
+
+# Inspection
+curl 'http://localhost:3000/api/fsuae/cpu'
+curl 'http://localhost:3000/api/fsuae/disasm?addr=pc&count=16&annotate=1'
+curl 'http://localhost:3000/api/fsuae/memmap'
+
+# Hardware watchpoint
+curl -X POST 'http://localhost:3000/api/fsuae/watchpoints?addr=0xC0&size=4&rwi=W&mustchange=1'
+
+# Symbol / FD lookup
+curl 'http://localhost:3000/api/fsuae/symbols/lookup?addr=0xDFF096'
+curl 'http://localhost:3000/api/fsuae/fd/lookup?offset=-552'
+```
+
+Full list: 28 routes under `/api/fsuae/*` — see `amiga-devbench/amiga_devbench/server.py` (`api_fsuae_*` handlers) for the canonical list.
+
+#### Snapshot slot helpers
+
+```sh
+# List slot status (size, mtime)
+curl http://localhost:3000/api/fsuae/snapshot/list
+
+# Save / load a numbered slot (1..9) under ~/.amiga-devbench/snapshots/
+curl -X POST http://localhost:3000/api/fsuae/snapshot/slot/1/save
+curl -X POST http://localhost:3000/api/fsuae/snapshot/slot/1/load
+
+# Diff two snapshots (slot-N shorthand, or absolute paths)
+curl 'http://localhost:3000/api/fsuae/snapshot/diff?a=slot-1&b=slot-2'
+curl 'http://localhost:3000/api/fsuae/snapshot/diff?a=/tmp/before.uss&b=/tmp/after.uss'
+```
+
+The diff endpoint shells out to `tools/uss_diff.py` from the patched fork if available — searched in `~/.amiga-devbench/fsuae_remote_patch/`, `~/code/fsuae_remote_patch/`, and `/tmp/fsuae-src/`. Without it, returns a byte-summary instead.
 
 ---
 
@@ -1501,18 +1726,21 @@ The About dialog includes a tribute to the [Sacramento Amiga Computer Club](http
 
 ### Tab Organization
 
-The web UI is organized into 8 main tabs, several with sub-tabs:
+The web UI is organized into 9 main tabs (the **FS-UAE** tab only appears when the patched fs-uae build is detected — see [Two debuggers](#two-debuggers-when-to-use-which)):
 
-| Tab | Sub-tabs | Purpose |
-|-----|----------|---------|
-| **Dashboard** | — | Connection status, system info, quick actions, emulator control |
-| **Logs** | — | Real-time log streaming with level/client/text filtering |
-| **Files** | Browser, Transfer | Amiga filesystem navigation, host↔Amiga file transfers |
-| **Tools** | Memory, Variables, Shell, Tasks | Memory inspection, variable editing, AmigaDOS shell, task list |
-| **Inspect** | Graphics, System, Debug | Screenshots, palettes, copper lists, sprites, SnoopDos, input injection |
-| **Develop** | — | Build & Run, New Project scaffolding, Test Harness |
-| **Debugger** | — | Source-level debugging with breakpoints, stepping, registers, call stack |
-| **Settings** | Config, Traffic | Serial/emulator/server config, MCP/REST request logging |
+| Tab | Backend | Sub-tabs | Purpose |
+|-----|---------|----------|---------|
+| **Dashboard** | bridge | — | Connection status, system info, quick actions, emulator control |
+| **Logs** | bridge | — | Real-time log streaming with level/client/text filtering |
+| **Files** | bridge | Browser, Transfer | Amiga filesystem navigation, host↔Amiga file transfers |
+| **Tools** | bridge | Memory, Variables, Shell, Tasks | Memory inspection, variable editing, AmigaDOS shell, task list |
+| **Inspect** | bridge | Graphics, System, Debug | Screenshots, palettes, copper lists, sprites, SnoopDos, input injection |
+| **Develop** | host | — | Build & Run, New Project scaffolding, Test Harness |
+| **Debugger** | **bridge** (serial / Amiga daemon) | — | Source-level debugging — breakpoints by file:line, locals, call stack |
+| **FS-UAE** | **fs-uae HTTP RPC** (patched build only) | CPU & Breakpoints, Memory, Chipset, State & Symbols | Emulator-level CPU debugger — hardware watchpoints, ROM inspection, chipset snapshot |
+| **Settings** | host | Config, Traffic | Serial/emulator/server config, MCP/REST request logging |
+
+The "Backend" column tells you whether the tab requires the Amiga bridge daemon to be running (`bridge`), the patched fs-uae build (`fs-uae HTTP RPC`), or just devbench itself (`host`).
 
 ### Debugger Tab
 
@@ -1578,6 +1806,75 @@ The bridge daemon's debugger module (`debugger.c`) installs 68k exception handle
 4. Register state is captured in the exception handler and sent as **DBGSTOP** events.
 5. **Step Over** detection: compares the stopped PC against known function entry points to determine if we entered a call, and sets a temporary breakpoint at the return address.
 
+### FS-UAE Tab
+
+Appears only when devbench detects the patched fs-uae build (header shows green "RPC: live" badge). See [Two debuggers](#two-debuggers-when-to-use-which) for when to use this vs the Debugger tab.
+
+The tab has a banner at the top reminding you which backend it talks to (`fs-uae HTTP RPC`), and a shared toolbar across all sub-tabs:
+
+| Control | Effect |
+|---|---|
+| ■ Pause / ▶ Resume | Stop / resume the emulator |
+| ↓ Step / ↓×100 | Step 1 or 100 CPU instructions |
+| Step Over | Run JSR/BSR to completion, re-pause at the next instruction |
+| Step Out | Run until the current function returns |
+| Hard Reset / Soft Reset | Power-on (RAM clear) or CTRL+A+A equivalent |
+| State / PC display | Live emulator state + program counter |
+| ↻ Refresh | Re-read CPU + state + BP/WP lists |
+
+#### Sub-tab: CPU & Breakpoints
+- **Disassembly** (left, ~55%): enter address and count, optionally annotate JSR/JMP `-$xxx(A6)` calls with their library function names (e.g. `exec.OpenLibrary()`).
+  - **Source xref** checkbox: when on, devbench cross-references each disassembled address against the symbols loaded in the bridge Debugger tab. If a match is found, the source file + line number is shown beneath each instruction (`↳ funcName  myfile.c:123`). Useful for "where in my code is this fs-uae-level instruction?". A project picker appears when source xref is enabled, in case you have multiple projects' symbols loaded.
+- **CPU Registers** (top-right): all 18 regs (D0-D7, A0-A7, PC, SR, USP, ISP). Click any value to inline-edit.
+- **Breakpoints (CPU)**: address + skip-count (silently ignore the first N hits) + one-shot toggle. Up to 20 active. Works on Kickstart ROM.
+- **Watchpoints (MEM)**: hardware-style watchpoints — address + size (bytes) + R/W/I + `mustchange` (skip writes-of-same-value). "Last hit" line shows the triggering PC + value the moment a WP fires.
+
+#### Sub-tab: Memory
+- **Hex viewer**: read up to 64KB from any address via fs-uae's debug memory accessor (works on Kickstart ROM and during early boot — unlike the bridge-based memory tool).
+  - **Format selector**: `bytes` (16/row + ASCII), `words` (8 big-endian words/row), `longs` (4 big-endian longwords/row, **clickable to follow pointer**), `ASCII` (32 chars/row).
+  - **← Back button**: navigation history — every pointer-follow pushes the previous address on a stack.
+- **Memory writer**: write hex bytes to any address (pause first; writes to unmapped/ROM regions silently no-op — check the memory map first).
+- **Memory map** (right): per-region table with kind (chipram / ram / rom / io / cia / unmapped) and label. Useful before issuing a write.
+- **Stack walk**: read N longwords from `(A7)` upward with `code` / `data` heuristic tagging — candidate return-address chain for manual stack walking on m68k.
+
+#### Sub-tab: Chipset
+- One-click snapshot of all Amiga custom registers, grouped by area: DMA/Interrupts (DMACON, INTENAR, INTREQR), Bitplane/Display (BPLCON0-3, DDFSTRT/STOP, DIWSTRT/STOP), Bitplane pointers (BPL1-6PT), Copper (COP1/2LC, COPJMP), Beam position (VPOSR, VHPOSR). Pause first for stable read.
+
+#### Sub-tab: State & Symbols
+- **Snapshot slots** (1–9): quick-save / quick-load to numbered `.uss` files under `~/.amiga-devbench/snapshots/`. Shows size + last-saved time per slot.
+  - **Keyboard shortcuts on the FS-UAE tab**: press `1`–`9` to load that slot; `Shift+1`–`Shift+9` to save into it.
+- **Custom path** save/load — for paths outside the slot dir.
+- **Snapshot diff**: pick two snapshots from the dropdowns and click Diff. Chunk-level diff via `fsuae_remote_patch/tools/uss_diff.py` if available (searched in `~/.amiga-devbench/`, `~/code/`, and a few known locations); falls back to a byte-summary if not. Output shows which `.uss` chunks differ.
+- **Symbol lookup**: look up any address against fs-uae's built-in table (~140 entries) — chipset registers (DFFxxx), CIA-A/B (BFExxx), 68k exception vectors.
+- **FD library offset lookup**: translate a negative offset (e.g. `-552`) into the library function name (`exec.RawDoFmt`). Defaults to exec; specify another loaded library if needed.
+- **FD library management**: list loaded FD tables, and load arbitrary `.fd` files from disk (e.g. `graphics.fd`, `intuition.fd`) so the disassembler can annotate `JSR -$xxx(A6)` calls into those libraries.
+
+#### Push notifications (WebSocket-driven)
+
+Devbench connects to fs-uae's `/v1/events` WebSocket as soon as the RPC goes live and republishes every frame onto its own SSE bus as `fsuae_event`. The UI listens for these and:
+
+- Refreshes CPU registers + disassembly + breakpoint/watchpoint lists automatically when the emulator pauses (no need to hit Refresh).
+- Flashes the FS-UAE tab amber for 5s on `wp_hit` (watchpoint fire) and `auto_paused` (bridge crash → auto-pause).
+- Surfaces the auto-pause reason in the State sub-tab status line.
+
+Event types seen on the bus:
+
+| Event | Source | Meaning |
+|---|---|---|
+| `hello` | fs-uae | Sent on WS connect. Confirms the push channel is live. |
+| `paused` | fs-uae | Emulator stopped (user pause, breakpoint, watchpoint, step complete). Includes `pc`, `reason`, optional `bp_slot` / `bp_hits`. |
+| `running` | fs-uae | Emulator resumed. |
+| `wp_hit` | fs-uae | A watchpoint fired (in addition to the `paused` event). |
+| `ws_connected` | devbench | Synthetic — devbench established the WS connection. |
+| `ws_disconnected` | devbench | Synthetic — devbench lost the WS connection (will reconnect with backoff). |
+| `auto_paused` | devbench | Synthetic — devbench paused fs-uae because the bridge reported a crash. Carries `reason`, `alertNum`, `pc`. |
+
+#### Auto-pause on bridge crash
+
+When the Amiga bridge reports a crash (Guru alert, access fault, etc.), devbench can automatically pause fs-uae so the CPU state is frozen at the fault moment for inspection — instead of fs-uae continuing past the alert and overwriting state.
+
+Controlled by `[fsuae_rpc] auto_pause_on_crash = true` in `devbench.toml` (default on). When it triggers, an `auto_paused` event is published with the alert number and PC for context.
+
 ### SSE Event Stream
 
 The web UI connects to `/api/events` for real-time updates:
@@ -1610,6 +1907,9 @@ The web UI connects to `/api/events` for real-time updates:
 | `protect` | `{path, bits}` | Protection bits response |
 | `connected` | `{}` | Status indicator → green |
 | `disconnected` | `{}` | Status indicator → red |
+| `emulator_status` | `{running, pid, uptime, binary, configured_binary, patched, config}` | Header emulator dot + FS-UAE tab visibility |
+| `fsuae_rpc_status` | `{status, enabled, host, port, base_url, service, last_probe, last_error}` | Header RPC badge + FS-UAE tab availability |
+| `fsuae_event` | `{event, ...}` — pushed from fs-uae's `/v1/events` WebSocket. Events: `hello`, `paused`, `running`, `wp_hit`, `auto_paused` (synthetic), `ws_connected` / `ws_disconnected` (synthetic) | FS-UAE tab auto-refresh on paused; flash tab amber on wp_hit / auto_paused |
 
 ---
 

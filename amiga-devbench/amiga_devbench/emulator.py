@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 import signal
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -13,6 +15,71 @@ from typing import Any
 from .state import EventBus
 
 logger = logging.getLogger(__name__)
+
+
+# Locations searched when [emulator] binary = "auto". Ordered: patched-build
+# first (so users with both installed get the debugger features), then stock
+# fs-uae from PATH.
+_PATCHED_FSUAE_CANDIDATES = [
+    "$AMIGA_MCP_FSUAE_BIN",                    # explicit override
+    "~/.amiga-devbench/fs-uae",                # installer-managed location
+    "/tmp/fsuae-src/fs-uae",                   # default of fsuae_remote_patch/build.sh
+    "~/code/fsuae_remote_patch/fs-uae",        # common dev checkout
+]
+
+
+def _expand(path: str) -> str:
+    """Expand $VAR and ~ in a candidate path."""
+    return os.path.expanduser(os.path.expandvars(path))
+
+
+def _looks_patched(binary: str) -> bool | None:
+    """Best-effort check: does this fs-uae binary include the RPC patch?
+
+    Returns True/False if we could tell, None if inconclusive. We probe by
+    grepping the binary for the RPC service banner — cheap and reliable.
+    """
+    try:
+        p = Path(binary)
+        if not p.exists() or not os.access(binary, os.X_OK):
+            return None
+        # The patched binary embeds the literal "fs-uae-rpc v1" service string.
+        # Read at most 50 MB (real binary is ~20 MB) to bound the probe.
+        with open(binary, "rb") as f:
+            blob = f.read(50 * 1024 * 1024)
+        return b"fs-uae-rpc" in blob
+    except Exception:
+        return None
+
+
+def discover_fsuae_binary(configured: str = "auto") -> tuple[str, bool]:
+    """Pick an fs-uae binary path. Returns (path, is_patched_likely).
+
+    If `configured` is anything other than the literal "auto", return it as-is
+    after a best-effort patched-detection probe (so logs still tell the user
+    whether it's the debugger build). When "auto", scan the candidates above,
+    preferring the first one that looks patched; otherwise fall back to stock
+    fs-uae on PATH; otherwise the (likely stale) default.
+    """
+    if configured and configured.lower() != "auto":
+        return configured, bool(_looks_patched(configured))
+
+    for cand in _PATCHED_FSUAE_CANDIDATES:
+        expanded = _expand(cand)
+        if not expanded or expanded == cand and "$" in cand:  # unexpanded var
+            continue
+        if Path(expanded).is_file() and os.access(expanded, os.X_OK):
+            if _looks_patched(expanded):
+                return expanded, True
+
+    # Fall back to whatever `fs-uae` is on PATH (likely stock from brew/apt).
+    on_path = shutil.which("fs-uae")
+    if on_path:
+        return on_path, bool(_looks_patched(on_path))
+
+    # Last-resort: the original hardcoded default. Will fail later in start()
+    # with a clear "binary not found" error.
+    return "/opt/homebrew/bin/fs-uae", False
 
 
 class EmulatorManager:
@@ -23,13 +90,33 @@ class EmulatorManager:
         binary: str = "/opt/homebrew/bin/fs-uae",
         config_file: str = "",
         event_bus: EventBus | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> None:
-        self._binary = binary
+        # Resolve "auto" sentinel up front so .get_status() reports the
+        # real path and _find_external_pid() matches the actual binary name.
+        resolved, is_patched = discover_fsuae_binary(binary)
+        self._configured_binary = binary
+        self._binary = resolved
+        self._is_patched = is_patched
         self._config_file = config_file
         self._event_bus = event_bus
+        self._extra_env = dict(extra_env) if extra_env else {}
         self._process: asyncio.subprocess.Process | None = None
         self._monitor_task: asyncio.Task | None = None
         self._started_at: float | None = None
+        if (binary or "").lower() == "auto":
+            tag = "patched (debugger build)" if is_patched else "stock"
+            logger.info("Emulator auto-discovery: %s — %s", resolved, tag)
+        elif is_patched:
+            logger.info("Emulator: %s (patched debugger build detected)", resolved)
+
+    def set_extra_env(self, env: dict[str, str]) -> None:
+        """Replace the env-var overlay merged into the FS-UAE subprocess.
+
+        Stock fs-uae ignores unknown vars; the patched build picks up
+        FSUAE_RPC_PORT / FSUAE_RPC_PAUSE_AT_BOOT / FSUAE_GDB_PORT here.
+        """
+        self._extra_env = dict(env)
 
     @property
     def is_running(self) -> bool:
@@ -71,6 +158,8 @@ class EmulatorManager:
             "pid": self.pid,
             "uptime": round(self.uptime, 1) if self.uptime else None,
             "binary": self._binary,
+            "configured_binary": self._configured_binary,
+            "patched": self._is_patched,
             "config": self._config_file,
         }
 
@@ -93,6 +182,12 @@ class EmulatorManager:
 
         logger.info("Starting emulator: %s %s", self._binary, config_path)
 
+        env = os.environ.copy()
+        env.update(self._extra_env)
+        if self._extra_env:
+            logger.info("Emulator env overlay: %s",
+                        ", ".join(f"{k}={v}" for k, v in self._extra_env.items()))
+
         try:
             self._process = await asyncio.create_subprocess_exec(
                 self._binary, str(config_path),
@@ -100,6 +195,7 @@ class EmulatorManager:
                 stderr=asyncio.subprocess.DEVNULL,
                 # Create new process group so we can cleanly kill it
                 preexec_fn=os.setsid,
+                env=env,
             )
             self._started_at = time.time()
             logger.info("Emulator started (pid %d)", self._process.pid)
