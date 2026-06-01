@@ -1222,6 +1222,12 @@ def create_app(args: Any, cfg: DevBenchConfig | None = None) -> Starlette:
 
             crash_pause_task = asyncio.ensure_future(_crash_auto_pauser())
 
+            # Apply any auto-snapshot config from devbench.toml. Off (interval=0)
+            # by default; only starts the worker if explicitly enabled.
+            if cfg and cfg.fsuae_auto_snapshot_interval_s > 0:
+                _auto_snap_apply(cfg.fsuae_auto_snapshot_interval_s,
+                                 cfg.fsuae_auto_snapshot_ring_size)
+
             # Start persistent event logger
             if _plog:
                 _plog.start(_event_bus)
@@ -1231,6 +1237,8 @@ def create_app(args: Any, cfg: DevBenchConfig | None = None) -> Starlette:
             ready_task.cancel()
             dbg_listener_task.cancel()
             crash_pause_task.cancel()
+            if _auto_snap.task and not _auto_snap.task.done():
+                _auto_snap.task.cancel()
 
             # Shutdown
             if _gdb_server:
@@ -2815,6 +2823,32 @@ def create_app(args: Any, cfg: DevBenchConfig | None = None) -> Starlette:
         if err: return err
         return JSONResponse(await _fsuae_rpc.bp_clear())
 
+    async def api_fsuae_bp_by_symbol(request: Request) -> JSONResponse:
+        """Cross-debugger feature: install a fs-uae CPU breakpoint at the
+        address of a function known to the bridge debugger's symbol tables.
+        Zero ambient cost — pure translation; only invoked on user action.
+        """
+        err = _require_rpc()
+        if err: return err
+        name = request.query_params.get("name", "")
+        project = request.query_params.get("project") or None
+        if not name:
+            return JSONResponse({"ok": False, "err": "missing name"})
+        from . import symbols
+        hit = symbols.lookup_function_address(name, project)
+        if hit is None:
+            return JSONResponse({
+                "ok": False,
+                "err": f"no symbol '{name}' in loaded projects — load symbols in the Debugger tab first",
+            })
+        resolved_project, addr = hit
+        skip = int(request.query_params.get("skip", "0"))
+        oneshot = request.query_params.get("oneshot", "0") != "0"
+        body = await _fsuae_rpc.bp_add(f"0x{addr:08x}", skip=skip, oneshot=oneshot)
+        body["symbol"] = name
+        body["resolved_project"] = resolved_project
+        return JSONResponse(body)
+
     async def api_fsuae_watchpoints(request: Request) -> JSONResponse:
         err = _require_rpc()
         if err: return err
@@ -2906,9 +2940,28 @@ def create_app(args: Any, cfg: DevBenchConfig | None = None) -> Starlette:
     # we can find it, so users can compare two snapshots without leaving the UI.
 
     _SNAPSHOT_DIR = Path.home() / ".amiga-devbench" / "snapshots"
+    _LABELS_FILE = _SNAPSHOT_DIR / ".labels.json"
 
     def _slot_path(slot: int) -> Path:
         return _SNAPSHOT_DIR / f"slot-{slot}.uss"
+
+    def _load_labels() -> dict[str, str]:
+        """Read the sidecar label map. Keys are 'slot-N' or 'auto-N'; values
+        are user-set human labels. Returns {} if file missing or unreadable.
+        Sidecar JSON lives alongside the .uss files so labels travel with
+        them if the user copies the dir."""
+        if not _LABELS_FILE.exists():
+            return {}
+        try:
+            return json.loads(_LABELS_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    def _save_labels(labels: dict[str, str]) -> None:
+        _SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        # Drop empty labels so the file stays clean
+        cleaned = {k: v for k, v in labels.items() if v}
+        _LABELS_FILE.write_text(json.dumps(cleaned, indent=2, sort_keys=True))
 
     def _find_uss_diff_tool() -> str | None:
         """Locate fsuae_remote_patch/tools/uss_diff.py. We don't ship our own
@@ -2939,7 +2992,69 @@ def create_app(args: Any, cfg: DevBenchConfig | None = None) -> Starlette:
                 })
             else:
                 slots.append({"slot": n, "path": str(p), "size": 0, "mtime": None})
-        return JSONResponse({"ok": True, "dir": str(_SNAPSHOT_DIR), "slots": slots})
+        # Auto-snapshot ring: only include slots that exist on disk.
+        auto = []
+        for n in range(_auto_snap.ring_size):
+            p = _SNAPSHOT_DIR / f"auto-{n}.uss"
+            if p.exists():
+                stat = p.stat()
+                auto.append({
+                    "slot": f"auto-{n}",
+                    "path": str(p),
+                    "size": stat.st_size,
+                    "mtime": stat.st_mtime,
+                })
+        return JSONResponse({
+            "ok": True,
+            "dir": str(_SNAPSHOT_DIR),
+            "slots": slots,
+            "auto": auto,
+            "labels": _load_labels(),
+            "autosnap": {
+                "enabled": _auto_snap.interval > 0,
+                "interval": _auto_snap.interval,
+                "ring_size": _auto_snap.ring_size,
+            },
+        })
+
+    async def api_fsuae_snapshot_label(request: Request) -> JSONResponse:
+        """Set or clear the user-facing label for a snapshot slot.
+
+        slot is the key as it appears in the slots/auto lists: `slot-1` .. `slot-9`
+        or `auto-0` .. `auto-N`. An empty label deletes the entry.
+        Labels are stored in ~/.amiga-devbench/snapshots/.labels.json so they
+        survive across devbench restarts and travel with the snapshot dir.
+        """
+        slot = request.query_params.get("slot", "").strip()
+        label = request.query_params.get("label", "").strip()
+        if not slot:
+            return JSONResponse({"ok": False, "err": "missing slot"})
+        # Validate slot name shape
+        ok = False
+        if slot.startswith("slot-"):
+            try:
+                n = int(slot[5:])
+                ok = 1 <= n <= 9
+            except ValueError:
+                ok = False
+        elif slot.startswith("auto-"):
+            try:
+                int(slot[5:])
+                ok = True
+            except ValueError:
+                ok = False
+        if not ok:
+            return JSONResponse({"ok": False, "err": "slot must be slot-1..slot-9 or auto-N"})
+        # Cap length so the sidecar file stays bounded
+        if len(label) > 80:
+            label = label[:80]
+        labels = _load_labels()
+        if label:
+            labels[slot] = label
+        else:
+            labels.pop(slot, None)
+        _save_labels(labels)
+        return JSONResponse({"ok": True, "slot": slot, "label": label, "labels": labels})
 
     async def api_fsuae_snapshot_slot(request: Request) -> JSONResponse:
         err = _require_rpc()
@@ -2964,6 +3079,95 @@ def create_app(args: Any, cfg: DevBenchConfig | None = None) -> Starlette:
             r["slot"] = slot; r["path"] = path
             return JSONResponse(r)
         return JSONResponse({"ok": False, "err": "action must be save or load"})
+
+    # ─── Auto-snapshot ring buffer (opt-in) ───
+    # Off by default. When `_auto_snap.interval > 0`, a background task saves
+    # the emulator state to a rotating ring of slots every N seconds. Files
+    # are named auto-0.uss .. auto-{ring_size-1}.uss, written round-robin.
+    # Each save is ~19MB and stalls the emulator briefly, so the user has to
+    # opt in explicitly via config OR by hitting the runtime-toggle endpoint.
+
+    class _AutoSnapState:
+        def __init__(self) -> None:
+            self.interval: int = 0   # 0 = off
+            self.ring_size: int = 5
+            self.next_slot: int = 0
+            self.task: asyncio.Task | None = None
+            self.last_save: float = 0.0
+            self.last_error: str | None = None
+            self.saves_total: int = 0
+
+    _auto_snap = _AutoSnapState()
+
+    async def _auto_snap_loop() -> None:
+        while _auto_snap.interval > 0:
+            try:
+                await asyncio.sleep(_auto_snap.interval)
+                if _auto_snap.interval <= 0:  # cancelled between sleeps
+                    break
+                if not _fsuae_rpc or not _fsuae_rpc.available:
+                    continue
+                _SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+                slot = _auto_snap.next_slot % max(1, _auto_snap.ring_size)
+                path = str(_SNAPSHOT_DIR / f"auto-{slot}.uss")
+                r = await _fsuae_rpc.state_save(path)
+                if r.get("ok"):
+                    _auto_snap.next_slot += 1
+                    _auto_snap.last_save = time.time()
+                    _auto_snap.saves_total += 1
+                    _auto_snap.last_error = None
+                else:
+                    _auto_snap.last_error = r.get("err") or "save failed"
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                _auto_snap.last_error = f"{type(e).__name__}: {e}"
+
+    def _auto_snap_apply(interval: int, ring_size: int) -> None:
+        """Apply interval/ring_size and start/stop the background task as needed."""
+        if ring_size > 0:
+            _auto_snap.ring_size = ring_size
+        prev_interval = _auto_snap.interval
+        _auto_snap.interval = max(0, interval)
+        if _auto_snap.interval > 0 and (_auto_snap.task is None or _auto_snap.task.done()):
+            _auto_snap.task = asyncio.ensure_future(_auto_snap_loop())
+            logger.info("auto-snapshot: enabled (every %ds, ring %d)",
+                        _auto_snap.interval, _auto_snap.ring_size)
+        elif _auto_snap.interval == 0 and _auto_snap.task and not _auto_snap.task.done():
+            _auto_snap.task.cancel()
+            logger.info("auto-snapshot: disabled")
+        if _auto_snap.interval != prev_interval and _event_bus:
+            _event_bus.publish("fsuae_event", {
+                "event": "auto_snapshot_config",
+                "interval": _auto_snap.interval,
+                "ring_size": _auto_snap.ring_size,
+            })
+
+    async def api_fsuae_autosnap_status(request: Request) -> JSONResponse:
+        return JSONResponse({
+            "ok": True,
+            "interval": _auto_snap.interval,
+            "ring_size": _auto_snap.ring_size,
+            "next_slot": _auto_snap.next_slot % max(1, _auto_snap.ring_size),
+            "last_save": _auto_snap.last_save,
+            "last_error": _auto_snap.last_error,
+            "saves_total": _auto_snap.saves_total,
+            "enabled": _auto_snap.interval > 0,
+        })
+
+    async def api_fsuae_autosnap_set(request: Request) -> JSONResponse:
+        try:
+            interval = int(request.query_params.get("interval", "0"))
+            ring_size = int(request.query_params.get("ring_size",
+                                                     str(_auto_snap.ring_size)))
+        except ValueError:
+            return JSONResponse({"ok": False, "err": "bad interval or ring_size"})
+        if interval < 0 or interval > 3600:
+            return JSONResponse({"ok": False, "err": "interval must be 0..3600 seconds"})
+        if not (1 <= ring_size <= 64):
+            return JSONResponse({"ok": False, "err": "ring_size must be 1..64"})
+        _auto_snap_apply(interval, ring_size)
+        return await api_fsuae_autosnap_status(request)
 
     async def api_fsuae_snapshot_diff(request: Request) -> JSONResponse:
         a = request.query_params.get("a", "")
@@ -4798,6 +5002,7 @@ def create_app(args: Any, cfg: DevBenchConfig | None = None) -> Starlette:
         Route("/api/fsuae/stack", api_fsuae_stack, methods=["GET"]),
         Route("/api/fsuae/breakpoints", api_fsuae_breakpoints, methods=["GET", "POST"]),
         Route("/api/fsuae/breakpoints/clear", api_fsuae_breakpoints_clear, methods=["POST"]),
+        Route("/api/fsuae/breakpoints/by-symbol", api_fsuae_bp_by_symbol, methods=["POST"]),
         Route("/api/fsuae/watchpoints", api_fsuae_watchpoints, methods=["GET", "POST"]),
         Route("/api/fsuae/watchpoints/clear", api_fsuae_watchpoints_clear, methods=["POST"]),
         Route("/api/fsuae/watchpoints/last", api_fsuae_watchpoints_last, methods=["GET"]),
@@ -4806,7 +5011,10 @@ def create_app(args: Any, cfg: DevBenchConfig | None = None) -> Starlette:
         Route("/api/fsuae/cpu/write", api_fsuae_cpu_write, methods=["POST"]),
         Route("/api/fsuae/snapshot/list", api_fsuae_snapshot_list, methods=["GET"]),
         Route("/api/fsuae/snapshot/slot/{slot}/{action}", api_fsuae_snapshot_slot, methods=["POST"]),
+        Route("/api/fsuae/snapshot/label", api_fsuae_snapshot_label, methods=["POST"]),
         Route("/api/fsuae/snapshot/diff", api_fsuae_snapshot_diff, methods=["GET"]),
+        Route("/api/fsuae/snapshot/autosnap/status", api_fsuae_autosnap_status, methods=["GET"]),
+        Route("/api/fsuae/snapshot/autosnap/set", api_fsuae_autosnap_set, methods=["POST"]),
         Route("/api/fsuae/symbols/lookup", api_fsuae_symbol_lookup, methods=["GET"]),
         Route("/api/fsuae/fd/libraries", api_fsuae_fd_libraries, methods=["GET"]),
         Route("/api/fsuae/fd/lookup", api_fsuae_fd_lookup, methods=["GET"]),

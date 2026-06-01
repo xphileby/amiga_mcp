@@ -58,6 +58,14 @@ class DevBenchConfig:
     # When true, devbench listens for bridge `crash` events and pauses
     # fs-uae (via /v1/pause) so the CPU state is frozen for inspection.
     fsuae_auto_pause_on_crash: bool = True
+    # Auto-snapshot ring buffer — OFF BY DEFAULT.
+    # When > 0, devbench saves a .uss snapshot every N seconds to a rotating
+    # ring of slots (auto-0.uss, auto-1.uss, ...). Lets you "rewind" by loading
+    # an earlier snap. Each save is ~19MB and takes ~100-300ms — opt in only
+    # when you actually want the feature, since it does perceptibly affect
+    # emulator throughput while the save is happening.
+    fsuae_auto_snapshot_interval_s: int = 0  # 0 = off
+    fsuae_auto_snapshot_ring_size: int = 5
 
     # Simulator mode
     simulator: bool = False
@@ -155,6 +163,10 @@ def _apply_toml(cfg: DevBenchConfig, data: dict[str, Any]) -> None:
         cfg.fsuae_gdb_port = int(rpc["gdb_port"])
     if "auto_pause_on_crash" in rpc:
         cfg.fsuae_auto_pause_on_crash = bool(rpc["auto_pause_on_crash"])
+    if "auto_snapshot_interval_s" in rpc:
+        cfg.fsuae_auto_snapshot_interval_s = int(rpc["auto_snapshot_interval_s"])
+    if "auto_snapshot_ring_size" in rpc:
+        cfg.fsuae_auto_snapshot_ring_size = int(rpc["auto_snapshot_ring_size"])
 
 
 def apply_cli_overrides(cfg: DevBenchConfig, args: Any) -> None:
@@ -216,6 +228,10 @@ def save_config(cfg: DevBenchConfig, path: str | None = None) -> str:
         f'pause_at_boot = {"true" if cfg.fsuae_rpc_pause_at_boot else "false"}',
         f'gdb_port = {cfg.fsuae_gdb_port}  # 0 disables the in-emulator GDB stub',
         f'auto_pause_on_crash = {"true" if cfg.fsuae_auto_pause_on_crash else "false"}',
+        f'# Auto-snapshot ring buffer — OFF by default. Set to e.g. 30 for a snap every 30s.',
+        f'# Each save is ~19MB / ~200ms and DOES affect emulator throughput while saving.',
+        f'auto_snapshot_interval_s = {cfg.fsuae_auto_snapshot_interval_s}  # 0 disables',
+        f'auto_snapshot_ring_size = {cfg.fsuae_auto_snapshot_ring_size}    # rotating slots',
         '',
     ]
 

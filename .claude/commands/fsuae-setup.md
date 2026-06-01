@@ -211,6 +211,28 @@ The Web UI grows a new top-level **FS-UAE** tab with four sub-tabs:
 | **Chipset** | One-click snapshot of DMACON, INTENA/INTREQ, BPLCONx, copper / bitplane pointers, beam position |
 | **State & Symbols** | **Snapshot slots 1-9** (quick savestates with 1-9 keyboard shortcuts; Shift+N saves, N loads), snapshot diff (chunk-level via `uss_diff.py`), custom-path snapshot save/load, symbol lookup, FD library offset lookup, FD library loader |
 
+### Auto-snapshot ring (opt-in, off by default)
+
+Devbench can periodically save state to a rotating ring of `.uss` files, giving you approximate rewind for forensic debugging. **Has perceptible perf impact** (~200ms stall every interval) so it's strictly opt-in:
+
+```toml
+[fsuae_rpc]
+auto_snapshot_interval_s = 0     # 0 = off. Set to e.g. 30 to enable.
+auto_snapshot_ring_size = 5      # rotating slots
+```
+
+Or toggle at runtime from the State & Symbols sub-tab → "AUTO-SNAPSHOT RING" panel. Files land at `~/.amiga-devbench/snapshots/auto-N.uss`.
+
+### Symbolic breakpoints
+
+Set a fs-uae CPU breakpoint by function name (resolved against bridge symbols loaded in the Debugger tab):
+
+- UI: CPU & Breakpoints sub-tab → enter a function name in the BP input → click **+ BP @symbol**
+- MCP: `amiga_fsuae_breakpoint_by_symbol("draw_ball")`
+- HTTP: `POST /api/fsuae/breakpoints/by-symbol?name=draw_ball`
+
+Requires symbols to have been loaded first (Debugger tab → Load Symbols, or `amiga_load_symbols`).
+
 ### Push events + auto-pause
 
 Devbench connects to fs-uae's `/v1/events` WebSocket and republishes frames on its own SSE bus, so the UI gets push notifications:

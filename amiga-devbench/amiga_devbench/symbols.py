@@ -571,6 +571,29 @@ def annotate_address_full(addr: int, project: str | None = None) -> dict[str, An
     return {"address": f"{addr:08x}"}
 
 
+def lookup_function_address(name: str, project: str | None = None) -> tuple[str, int] | None:
+    """Find a function or symbol by name across loaded tables.
+
+    Returns (project_name, address) on success. When `project` is given,
+    that table is searched first; otherwise all loaded projects are checked.
+    Used by the fs-uae symbolic-breakpoint endpoint to translate a name
+    into a CPU address before installing a BP.
+    """
+    if project:
+        table = _tables.get(project)
+        if table:
+            addr = table.lookup_name(name)
+            if addr is not None:
+                return project, addr
+
+    for proj_name, table in _tables.items():
+        addr = table.lookup_name(name)
+        if addr is not None:
+            return proj_name, addr
+
+    return None
+
+
 def source_line_for_address(addr: int, project: str | None = None) -> str:
     """Get 'file:line' string for an address, or empty string."""
     if project:

@@ -2787,6 +2787,34 @@ async def amiga_fsuae_breakpoint_clear() -> str:
 
 
 @mcp.tool()
+async def amiga_fsuae_breakpoint_by_symbol(name: str, project: str | None = None,
+                                            skip: int = 0, oneshot: bool = False) -> str:
+    """Install a fs-uae CPU breakpoint at the address of a function known to the bridge symbol tables.
+
+    Cross-debugger feature: bridges the bridge debugger's source-level symbols
+    (loaded via amiga_load_symbols) into a fs-uae CPU breakpoint. Lets you say
+    `amiga_fsuae_breakpoint_by_symbol("draw_ball")` instead of looking up the
+    address manually.
+
+    name: function/symbol name (e.g. "draw_ball" or "main")
+    project: optional project name to disambiguate when multiple projects' symbols are loaded
+    skip/oneshot: same semantics as amiga_fsuae_breakpoint_add
+    """
+    if not _fsuae_rpc or not _fsuae_rpc.available:
+        return _rpc_unavailable()
+    from . import symbols as _sym
+    hit = _sym.lookup_function_address(name, project)
+    if hit is None:
+        return (f"No symbol '{name}' found in loaded projects.\n"
+                "Load symbols first via amiga_load_symbols (or the Debugger tab → Load Symbols).")
+    proj, addr = hit
+    body = await _fsuae_rpc.bp_add(f"0x{addr:08x}", skip=skip, oneshot=oneshot)
+    body["symbol"] = name
+    body["resolved_project"] = proj
+    return _rpc_render(body)
+
+
+@mcp.tool()
 async def amiga_fsuae_watchpoint_add(addr: str, size: int = 1, rwi: str = "RW",
                                      mustchange: bool = False,
                                      val: str | None = None,

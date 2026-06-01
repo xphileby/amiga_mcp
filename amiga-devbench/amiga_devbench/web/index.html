@@ -1889,11 +1889,12 @@
                   <span>BREAKPOINTS (CPU)</span>
                   <button class="btn" onclick="fsuaeBpClear()" style="font-size:10px;padding:1px 6px;">Clear All</button>
                 </div>
-                <div style="margin-bottom:6px;display:flex;gap:4px;">
-                  <input id="fsuaeBpAddr" type="text" placeholder="addr (e.g. 0xFC0234)" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;flex:1;">
+                <div style="margin-bottom:6px;display:flex;gap:4px;flex-wrap:wrap;">
+                  <input id="fsuaeBpAddr" type="text" placeholder="addr (e.g. 0xFC0234) or symbol name" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;flex:1;min-width:160px;">
                   <input id="fsuaeBpSkip" type="number" value="0" min="0" placeholder="skip" title="Skip first N hits" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;width:50px;">
                   <label style="font-size:11px;color:var(--text-dim);align-self:center;"><input type="checkbox" id="fsuaeBpOneshot"> 1-shot</label>
-                  <button class="btn" onclick="fsuaeBpAdd()" style="font-size:11px;padding:3px 8px;">+ BP</button>
+                  <button class="btn" onclick="fsuaeBpAdd()" style="font-size:11px;padding:3px 8px;" title="Treat input as a hex address">+ BP @addr</button>
+                  <button class="btn" onclick="fsuaeBpAddSymbol()" style="font-size:11px;padding:3px 8px;" title="Treat input as a function name from bridge symbols (load symbols in Debugger tab first)">+ BP @symbol</button>
                 </div>
                 <div id="fsuaeBpList" style="font-family:monospace;font-size:11px;color:var(--text-dim);">No breakpoints.</div>
               </div>
@@ -2008,6 +2009,21 @@
                   <button class="btn" onclick="fsuaeStateLoad()" style="font-size:11px;padding:3px 8px;">Load</button>
                 </div>
                 <div id="fsuaeStateMsg" style="margin-top:6px;font-family:monospace;font-size:11px;color:var(--text-dim);"></div>
+              </div>
+
+              <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:4px;padding:8px;">
+                <div style="font-size:11px;font-weight:bold;color:var(--text-dim);margin-bottom:4px;">AUTO-SNAPSHOT RING <span style="font-weight:normal;font-style:italic;">(off by default; opt-in)</span></div>
+                <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;">Periodic state save to a rotating ring. <strong>Has perceptible perf impact while saving</strong> (~200ms stall every interval). Useful for approximate rewind: load an older <code>auto-N.uss</code> to step back in time.</div>
+                <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+                  <label style="font-size:11px;color:var(--text-dim);">Interval:</label>
+                  <input id="fsuaeAutosnapInterval" type="number" min="0" max="3600" value="0" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;width:70px;" title="seconds; 0 = off">
+                  <span style="font-size:11px;color:var(--text-dim);">sec</span>
+                  <label style="font-size:11px;color:var(--text-dim);margin-left:8px;">Ring:</label>
+                  <input id="fsuaeAutosnapRing" type="number" min="1" max="64" value="5" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;width:50px;" title="number of rotating slots">
+                  <button class="btn" onclick="fsuaeAutosnapApply()" style="font-size:11px;padding:3px 8px;">Apply</button>
+                  <button class="btn" onclick="fsuaeAutosnapDisable()" style="font-size:11px;padding:3px 8px;" title="Set interval to 0 and stop the worker">Disable</button>
+                </div>
+                <div id="fsuaeAutosnapStatus" style="margin-top:6px;font-family:monospace;font-size:11px;color:var(--text-dim);">off</div>
               </div>
 
               <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:4px;padding:8px;">
@@ -2691,6 +2707,21 @@ async function fsuaeBpAdd() {
   fsuaeBpRefresh();
 }
 async function fsuaeBpClear() { await fsuaeCall('/breakpoints/clear', {method:'POST'}); fsuaeBpRefresh(); }
+
+async function fsuaeBpAddSymbol() {
+  const name = document.getElementById('fsuaeBpAddr').value.trim();
+  if (!name) return;
+  const skip = parseInt(document.getElementById('fsuaeBpSkip').value, 10) || 0;
+  const oneshot = document.getElementById('fsuaeBpOneshot').checked ? 1 : 0;
+  const d = await fsuaeCall(`/breakpoints/by-symbol?name=${encodeURIComponent(name)}&skip=${skip}&oneshot=${oneshot}`, {method:'POST'});
+  if (!d.ok) {
+    // Surface error inline next to the BP list
+    const list = document.getElementById('fsuaeBpList');
+    list.innerHTML = `<div style="color:var(--red);">${escapeHtml(d.err || 'error')}</div>` + (list.innerHTML.startsWith('<div style="color:var(--red)') ? list.innerHTML.split('</div>').slice(1).join('</div>') : list.innerHTML);
+    return;
+  }
+  fsuaeBpRefresh();
+}
 async function fsuaeBpRefresh() {
   const d = await fsuaeCall('/breakpoints');
   const list = document.getElementById('fsuaeBpList');
@@ -2920,23 +2951,72 @@ async function fsuaeSlotsRefresh() {
   const d = await fetch('/api/fsuae/snapshot/list').then(r => r.json()).catch(() => null);
   const div = document.getElementById('fsuaeSlots');
   if (!d || !d.ok) { div.textContent = '(error loading slot list)'; return; }
+  const labels = d.labels || {};
   const fmt = (s) => {
     if (!s.mtime) return '<span style="color:var(--text-dim);">empty</span>';
     const dt = new Date(s.mtime * 1000);
     const kb = (s.size / 1024).toFixed(0);
     return `<span style="color:var(--text-primary);">${kb} KB</span> <span style="color:var(--text-dim);">${dt.toLocaleString()}</span>`;
   };
-  div.innerHTML = d.slots.map(s => `
+  // Don't clobber input focus when the user is typing a label
+  const focusedKey = (document.activeElement && document.activeElement.dataset && document.activeElement.dataset.labelKey) || null;
+  div.innerHTML = d.slots.map(s => {
+    const key = 'slot-' + s.slot;
+    const lbl = labels[key] || '';
+    return `
     <span style="color:var(--text-dim);">Slot ${s.slot}</span>
     <button class="btn" onclick="fsuaeSlotSave(${s.slot})" style="font-size:10px;padding:1px 8px;">Save</button>
     <button class="btn" onclick="fsuaeSlotLoad(${s.slot})" ${s.mtime ? '' : 'disabled'} style="font-size:10px;padding:1px 8px;">Load</button>
-    <span>${fmt(s)}</span>
-  `).join('');
-  // Populate diff dropdowns from filled slots
-  const opts = '<option value="">(pick a snapshot)</option>' +
-    d.slots.filter(s => s.mtime).map(s => `<option value="slot-${s.slot}">Slot ${s.slot}</option>`).join('');
-  document.getElementById('fsuaeDiffA').innerHTML = opts;
-  document.getElementById('fsuaeDiffB').innerHTML = opts;
+    <span>
+      <input type="text" data-label-key="${key}" value="${escapeHtml(lbl)}" placeholder="label" onchange="fsuaeLabelSet('${key}', this.value)" style="background:var(--bg-input);border:1px solid var(--border);border-radius:3px;color:var(--text-primary);padding:1px 5px;font-size:11px;width:120px;" title="Custom name for this snapshot (Enter to save)">
+      ${fmt(s)}
+    </span>
+  `;
+  }).join('');
+  // Restore focus to the label input the user was editing, if any
+  if (focusedKey) {
+    const inp = div.querySelector(`input[data-label-key="${focusedKey}"]`);
+    if (inp) inp.focus();
+  }
+  // Populate diff dropdowns from filled slots + auto-snapshot ring (if any).
+  // Only rewrite innerHTML when the option set actually changes, otherwise we
+  // clobber the user's in-progress selection on every refresh tick.
+  const slotOpts = d.slots.filter(s => s.mtime).map(s => {
+    const lbl = (d.labels || {})['slot-' + s.slot];
+    const label = lbl ? `Slot ${s.slot} — ${lbl}` : `Slot ${s.slot}`;
+    return `<option value="slot-${s.slot}">${escapeHtml(label)}</option>`;
+  }).join('');
+  const autoOpts = (d.auto || []).map(s => {
+    const lbl = (d.labels || {})[s.slot];
+    const time = new Date(s.mtime*1000).toLocaleTimeString();
+    const label = lbl ? `${s.slot} — ${lbl} (${time})` : `${s.slot} (${time})`;
+    return `<option value="${s.path}">${escapeHtml(label)}</option>`;
+  }).join('');
+  const opts = '<option value="">(pick a snapshot)</option>' + slotOpts + autoOpts;
+  for (const id of ['fsuaeDiffA', 'fsuaeDiffB']) {
+    const sel = document.getElementById(id);
+    if (sel.innerHTML !== opts) {
+      const prev = sel.value;
+      sel.innerHTML = opts;
+      if ([...sel.options].some(o => o.value === prev)) sel.value = prev;  // restore
+    }
+  }
+  // Refresh the autosnap status panel too (one-way — autosnap doesn't refresh slots back).
+  try {
+    const ad = await fetch('/api/fsuae/snapshot/autosnap/status').then(r => r.json());
+    fsuaeAutosnapRefresh(ad);
+  } catch (e) { /* ignore */ }
+}
+
+async function fsuaeLabelSet(slotKey, label) {
+  const d = await fetch(`/api/fsuae/snapshot/label?slot=${encodeURIComponent(slotKey)}&label=${encodeURIComponent(label || '')}`, {method:'POST'}).then(r => r.json()).catch(() => ({ok:false, err:'network'}));
+  if (!d.ok) {
+    const msg = document.getElementById('fsuaeStateMsg');
+    if (msg) { msg.style.color = 'var(--red)'; msg.textContent = `label save failed: ${d.err}`; }
+    return;
+  }
+  // Refresh diff dropdowns so labels appear there too
+  fsuaeSlotsRefresh();
 }
 
 async function fsuaeSlotSave(n) {
@@ -2957,6 +3037,44 @@ async function fsuaeSlotLoad(n) {
   msg.style.color = d.ok ? 'var(--green)' : 'var(--red)';
   msg.textContent = d.ok ? `loaded slot ${n}` : `error: ${d.err}`;
   if (d.ok) fsuaeRefresh();
+}
+
+async function fsuaeAutosnapApply() {
+  const interval = parseInt(document.getElementById('fsuaeAutosnapInterval').value, 10) || 0;
+  const ringSize = parseInt(document.getElementById('fsuaeAutosnapRing').value, 10) || 5;
+  if (interval > 0 && !confirm(`Enable auto-snapshot every ${interval}s? Each save stalls the emulator briefly. Continue?`)) return;
+  const d = await fetch(`/api/fsuae/snapshot/autosnap/set?interval=${interval}&ring_size=${ringSize}`, {method:'POST'}).then(r => r.json());
+  fsuaeAutosnapRefresh(d);
+  fsuaeSlotsRefresh();   // ring size may have changed → re-list auto slots
+}
+
+async function fsuaeAutosnapDisable() {
+  const d = await fetch(`/api/fsuae/snapshot/autosnap/set?interval=0`, {method:'POST'}).then(r => r.json());
+  fsuaeAutosnapRefresh(d);
+  fsuaeSlotsRefresh();
+}
+
+// IMPORTANT: do NOT call fsuaeSlotsRefresh() from here — fsuaeSlotsRefresh
+// calls back into here after fetching status, which would create an infinite
+// refresh loop and cause the diff dropdowns to flicker out of selection.
+// Callers that need both should refresh slots explicitly after.
+function fsuaeAutosnapRefresh(d) {
+  const status = document.getElementById('fsuaeAutosnapStatus');
+  if (!d || !d.ok) { status.style.color = 'var(--red)'; status.textContent = (d && d.err) || 'error'; return; }
+  // Don't clobber the user's in-progress edits to these inputs — only update
+  // when the value actually differs and the input isn't focused.
+  const ivl = document.getElementById('fsuaeAutosnapInterval');
+  const ring = document.getElementById('fsuaeAutosnapRing');
+  if (document.activeElement !== ivl && String(ivl.value) !== String(d.interval)) ivl.value = d.interval;
+  if (document.activeElement !== ring && String(ring.value) !== String(d.ring_size)) ring.value = d.ring_size;
+  if (d.enabled) {
+    status.style.color = 'var(--green)';
+    const last = d.last_save ? new Date(d.last_save * 1000).toLocaleTimeString() : 'never';
+    status.textContent = `enabled (every ${d.interval}s, ring ${d.ring_size}); ${d.saves_total} saves, next slot auto-${d.next_slot}, last ${last}` + (d.last_error ? ` — last err: ${d.last_error}` : '');
+  } else {
+    status.style.color = 'var(--text-dim)';
+    status.textContent = 'off';
+  }
 }
 
 async function fsuaeDiff() {

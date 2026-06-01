@@ -1313,6 +1313,7 @@ Always call `amiga_fsuae_status` first to confirm the patched build is detected 
 | `amiga_fsuae_breakpoint_add` | `addr`, `skip?`, `oneshot?` | Add BP (up to 20). Works on Kickstart ROM. |
 | `amiga_fsuae_breakpoint_list` | — | List with hit counts |
 | `amiga_fsuae_breakpoint_clear` | — | Remove all |
+| `amiga_fsuae_breakpoint_by_symbol` | `name`, `project?`, `skip?`, `oneshot?` | **Cross-debugger:** install a CPU BP at the address of a function known to the bridge symbol tables. Requires `amiga_load_symbols` to have been called first. |
 | **Watchpoints (memory)** | | |
 | `amiga_fsuae_watchpoint_add` | `addr`, `size?`, `rwi?`, `mustchange?`, `val?`, `valmask?` | Hardware-style watchpoint (up to 20) |
 | `amiga_fsuae_watchpoint_list` | — | List active |
@@ -1379,7 +1380,7 @@ curl 'http://localhost:3000/api/fsuae/symbols/lookup?addr=0xDFF096'
 curl 'http://localhost:3000/api/fsuae/fd/lookup?offset=-552'
 ```
 
-Full list: 28 routes under `/api/fsuae/*` — see `amiga-devbench/amiga_devbench/server.py` (`api_fsuae_*` handlers) for the canonical list.
+Full list: 31 routes under `/api/fsuae/*` — see `amiga-devbench/amiga_devbench/server.py` (`api_fsuae_*` handlers) for the canonical list.
 
 #### Snapshot slot helpers
 
@@ -1397,6 +1398,21 @@ curl 'http://localhost:3000/api/fsuae/snapshot/diff?a=/tmp/before.uss&b=/tmp/aft
 ```
 
 The diff endpoint shells out to `tools/uss_diff.py` from the patched fork if available — searched in `~/.amiga-devbench/fsuae_remote_patch/`, `~/code/fsuae_remote_patch/`, and `/tmp/fsuae-src/`. Without it, returns a byte-summary instead.
+
+#### Auto-snapshot ring buffer
+
+```sh
+# Status (always returns; off by default)
+curl http://localhost:3000/api/fsuae/snapshot/autosnap/status
+
+# Enable: snap every 30s into a 5-slot ring
+curl -X POST 'http://localhost:3000/api/fsuae/snapshot/autosnap/set?interval=30&ring_size=5'
+
+# Disable
+curl -X POST 'http://localhost:3000/api/fsuae/snapshot/autosnap/set?interval=0'
+```
+
+Files are written as `~/.amiga-devbench/snapshots/auto-N.uss`. The `snapshot/list` endpoint reports them under an `auto:` key alongside the manual slots.
 
 ---
 
@@ -1874,6 +1890,33 @@ Event types seen on the bus:
 When the Amiga bridge reports a crash (Guru alert, access fault, etc.), devbench can automatically pause fs-uae so the CPU state is frozen at the fault moment for inspection — instead of fs-uae continuing past the alert and overwriting state.
 
 Controlled by `[fsuae_rpc] auto_pause_on_crash = true` in `devbench.toml` (default on). When it triggers, an `auto_paused` event is published with the alert number and PC for context.
+
+#### Auto-snapshot ring buffer (opt-in)
+
+**Off by default.** When enabled, devbench saves a `.uss` snapshot to a rotating ring every N seconds — letting you "rewind" by loading an earlier snapshot. Approximates reverse-continue for forensic debugging.
+
+Performance: each save is ~19MB and takes ~100-300ms, **stalling the emulator briefly**. Don't leave this on during normal sessions. Configure via:
+
+```toml
+[fsuae_rpc]
+auto_snapshot_interval_s = 0     # 0 = off (default). Set to e.g. 30 for snap-every-30s
+auto_snapshot_ring_size = 5      # rotating slots auto-0.uss .. auto-4.uss
+```
+
+Or toggle at runtime from the **State & Symbols** sub-tab → "AUTO-SNAPSHOT RING" panel, or via `POST /api/fsuae/snapshot/autosnap/set?interval=30&ring_size=5`. Disable with `interval=0`.
+
+#### Symbolic breakpoints from bridge symbols
+
+Set a fs-uae CPU breakpoint by **function name** instead of address — uses symbols loaded by the bridge Debugger tab.
+
+```sh
+# 1. Load symbols (in Debugger tab or via MCP amiga_load_symbols)
+# 2. Set BP by name:
+curl -X POST 'http://localhost:3000/api/fsuae/breakpoints/by-symbol?name=draw_ball'
+# {"ok":true,"slot":0,"addr":"0x00020e08","symbol":"draw_ball","resolved_project":"bouncing_ball",...}
+```
+
+Or via MCP: `amiga_fsuae_breakpoint_by_symbol("draw_ball")`. Or in the UI: the BP form on the CPU & Breakpoints sub-tab has a new **+ BP @symbol** button alongside the address one. Zero ambient cost — pure translation invoked only on user action.
 
 ### SSE Event Stream
 
