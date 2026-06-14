@@ -39,11 +39,13 @@ MCP tool, then `amiga_sysinfo`.
 ## How it works
 The daemon's transport is selected at startup behind a small dispatch layer
 (`transport.c`): serial I/O via `serial_io.c`, or TCP via `net_io.c`. In TCP
-mode the daemon creates a non-blocking listening socket and registers a
-`bsdsocket` SIGIO signal, which slots into the daemon's existing `Wait()` loop
-so the line protocol above the transport is untouched. A single host client is
-served at a time; a new connection replaces an existing one. On connect the
-daemon sends `READY|1.0`.
+mode the daemon creates a non-blocking listening socket bound to `INADDR_ANY`.
+Its main loop already wakes at least every 200ms on a timer tick, and it polls
+the transport (non-blocking `accept`/`recv`) on every wake, so the line protocol
+above the transport is untouched and no reliance is placed on the stack's SIGIO
+delivery (which proved unreliable on RoadShow). A single host client is served
+at a time; a new connection replaces an existing one. On connect the daemon
+sends `READY|1.0`.
 
 ## Testing without real hardware
 WinUAE and FS-UAE provide a built-in `bsdsocket.library` emulation that maps
