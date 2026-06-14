@@ -21,6 +21,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "bridge_internal.h"
 
@@ -228,6 +229,23 @@ int main(int argc, char **argv)
     ULONG serialSig, ipcSig, winSig, signals, received;
     int i;
 
+    /* Transport selection from CLI args:
+     *   amiga-bridge            -> serial (115200 baud), current behavior
+     *   amiga-bridge TCP        -> TCP server on default port 2345
+     *   amiga-bridge TCP <port> -> TCP server on <port>
+     */
+    int   sel_mode  = TRANSPORT_SERIAL;
+    ULONG sel_param = 115200;            /* serial baud */
+    if (argc >= 2 && (strcmp(argv[1], "TCP") == 0 || strcmp(argv[1], "tcp") == 0)) {
+        ULONG tcp_port = 2345;
+        if (argc >= 3) {
+            long p = atol(argv[2]);
+            if (p > 0 && p < 65536) tcp_port = (ULONG)p;
+        }
+        sel_mode  = TRANSPORT_TCP;
+        sel_param = tcp_port;
+    }
+
     /* Initialize UI log buffer */
     for (i = 0; i < UI_MAX_LOG_LINES; i++) {
         g_ui_logs[i][0] = '\0';
@@ -262,17 +280,18 @@ int main(int argc, char **argv)
     printf("  IPC: OK (port '%s')\n", BRIDGE_PORT_NAME);
     ui_add_log("IPC port created");
 
-    /* Open serial device - use high baud for FS-UAE PTY */
-    if (serial_open(115200) != 0) {
-        printf("  Serial: FAILED\n");
-        ui_add_log("ERR: Cannot open serial");
+    /* Open the selected transport (serial.device or TCP/bsdsocket) */
+    if (transport_open(sel_mode, sel_param) != 0) {
+        printf("  Transport: FAILED\n");
+        ui_add_log("ERR: Cannot open transport");
         g_serial_connected = FALSE;
     } else {
-        printf("  Serial: OK\n");
-        g_serial_connected = TRUE;
-        ui_add_log("Serial opened");
-        /* Start first async read */
-        serial_start_read();
+        printf("  Transport: OK\n");
+        /* Serial: device is open now -> connected. TCP: listening, but no peer
+         * yet -> connected becomes TRUE on accept (rising edge in main loop). */
+        g_serial_connected = transport_is_open();
+        ui_add_log(sel_mode == TRANSPORT_TCP ? "TCP listening" : "Serial opened");
+        transport_start_read();
     }
 
     /* Crash handler NOT installed at startup - enable via CRASHINIT command */
@@ -305,16 +324,11 @@ int main(int argc, char **argv)
         }
     }
 
-    /* Send READY to host */
-    if (g_serial_connected) {
-        protocol_send_raw("READY|1.0");
-    }
-
     /* Initial UI draw */
     ui_redraw();
 
     /* Build signal mask */
-    serialSig = serial_get_signal();
+    serialSig = transport_get_signal();   /* serial port sig OR tcp SIGIO */
     ipcSig = ipc_get_signal();
     winSig = 1UL << win->UserPort->mp_SigBit;
 
@@ -357,13 +371,23 @@ int main(int argc, char **argv)
             }
         }
 
-        /* Check serial data */
-        if (g_serial_connected && (received & serialSig)) {
+        /* Drain the transport (serial bytes, or TCP accept + recv) */
+        if (received & serialSig) {
             char ch;
-            while (serial_check_read(&ch)) {
+            while (transport_check_read(&ch)) {
                 handle_serial_byte(ch);
-                /* Restart async read for next byte */
-                serial_start_read();
+                transport_start_read();
+            }
+        }
+
+        /* Maintain link-connected state; greet a freshly connected peer */
+        {
+            BOOL now_conn = transport_is_open();
+            if (now_conn && !g_serial_connected) {
+                g_serial_connected = TRUE;
+                protocol_send_raw("READY|1.0");
+            } else if (!now_conn && g_serial_connected) {
+                g_serial_connected = FALSE;
             }
         }
 
@@ -464,7 +488,7 @@ int main(int argc, char **argv)
     if (timerReq) DeleteIORequest((struct IORequest *)timerReq);
     if (timerPort) DeleteMsgPort(timerPort);
 
-    serial_close();
+    transport_close();
     ipc_cleanup();
 
     if (win) {
