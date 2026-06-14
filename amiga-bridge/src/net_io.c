@@ -9,11 +9,13 @@
  */
 #include <exec/types.h>
 #include <proto/exec.h>
+#include <proto/dos.h>
 #include <proto/socket.h>
 
 #include <sys/socket.h>
+#include <sys/filio.h>
 #include <netinet/in.h>
-#include <bsdsocket/socketbasetags.h>
+#include <errno.h>
 #include <string.h>
 
 #include "bridge_internal.h"
@@ -76,8 +78,8 @@ int net_open(ULONG port)
         return -1;
     }
     io_sigmask = 1UL << io_sigbit;
-    SocketBaseTags(SBTM_SETVAL_SIGIO,  (ULONG)io_sigmask,
-                   SBTM_SETVAL_SIGURG, (ULONG)io_sigmask,
+    SocketBaseTags(SBTM_SETVAL(SBTC_SIGIOMASK),  (ULONG)io_sigmask,
+                   SBTM_SETVAL(SBTC_SIGURGMASK), (ULONG)io_sigmask,
                    TAG_END);
 
     listen_sock = socket(AF_INET, SOCK_STREAM, 0);
