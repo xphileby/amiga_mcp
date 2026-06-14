@@ -93,7 +93,7 @@ static void send_line(const char *line)
     if (len > BRIDGE_MAX_LINE) len = BRIDGE_MAX_LINE;
     CopyMem((APTR)line, sendbuf, len);
     sendbuf[len] = '\n';
-    serial_write(sendbuf, len + 1);
+    transport_write(sendbuf, len + 1);
     g_tx_count++;
 }
 
