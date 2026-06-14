@@ -115,8 +115,15 @@ void net_close(void)
 {
     if (client_sock >= 0) { CloseSocket(client_sock); client_sock = -1; }
     if (listen_sock >= 0) { CloseSocket(listen_sock); listen_sock = -1; }
-    if (io_sigbit != -1)  { FreeSignal(io_sigbit); io_sigbit = -1; io_sigmask = 0; }
-    if (SocketBase)       { CloseLibrary(SocketBase); SocketBase = NULL; }
+    if (SocketBase) {
+        /* Stop the stack signalling us before we free the signal bit */
+        SocketBaseTags(SBTM_SETVAL(SBTC_SIGIOMASK),  0UL,
+                       SBTM_SETVAL(SBTC_SIGURGMASK), 0UL,
+                       TAG_END);
+        CloseLibrary(SocketBase);
+        SocketBase = NULL;
+    }
+    if (io_sigbit != -1) { FreeSignal(io_sigbit); io_sigbit = -1; io_sigmask = 0; }
     rx_len = rx_pos = 0;
 }
 
@@ -159,7 +166,7 @@ int net_check_read(char *out_byte)
         drop_client();               /* peer closed */
         return 0;
     } else {
-        if (Errno() != EWOULDBLOCK) drop_client();
+        if (Errno() != EWOULDBLOCK && Errno() != EINTR) drop_client();
         return 0;
     }
 }
@@ -175,8 +182,10 @@ int net_write(const char *buf, int len)
         LONG n = send(client_sock, (APTR)(buf + sent), len - sent, 0);
         if (n > 0) {
             sent += (int)n;
+        } else if (n < 0 && Errno() == EINTR) {
+            continue;                /* interrupted: retry, no penalty */
         } else if (n < 0 && Errno() == EWOULDBLOCK) {
-            if (++guard > 1000) { drop_client(); return sent; }
+            if (++guard > 50) { drop_client(); return sent; }  /* ~1s cap */
             Delay(1);                /* ~20ms: let the send buffer drain */
         } else {
             drop_client();

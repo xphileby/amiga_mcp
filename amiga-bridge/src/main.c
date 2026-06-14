@@ -287,9 +287,9 @@ int main(int argc, char **argv)
         g_serial_connected = FALSE;
     } else {
         printf("  Transport: OK\n");
-        /* Serial: device is open now -> connected. TCP: listening, but no peer
-         * yet -> connected becomes TRUE on accept (rising edge in main loop). */
-        g_serial_connected = transport_is_open();
+        /* Enter the loop disconnected; the rising-edge block in the main loop
+         * greets the peer (serial: fires iteration 1; tcp: fires on accept). */
+        g_serial_connected = FALSE;
         ui_add_log(sel_mode == TRANSPORT_TCP ? "TCP listening" : "Serial opened");
         transport_start_read();
     }
