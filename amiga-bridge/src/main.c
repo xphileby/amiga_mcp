@@ -371,8 +371,12 @@ int main(int argc, char **argv)
             }
         }
 
-        /* Drain the transport (serial bytes, or TCP accept + recv) */
-        if (received & serialSig) {
+        /* Drain the transport (serial bytes, or TCP accept + recv).
+         * Polled unconditionally each loop iteration — the loop wakes at
+         * least every 200ms on the timer tick, so TCP accept/recv works even
+         * when the bsdsocket stack's SIGIO does not fire. transport_check_read
+         * is non-blocking and returns 0 when there is nothing pending. */
+        {
             char ch;
             while (transport_check_read(&ch)) {
                 handle_serial_byte(ch);
