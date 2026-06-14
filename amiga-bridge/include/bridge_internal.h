@@ -17,6 +17,29 @@ int serial_check_read(char *out_byte);
 ULONG serial_get_signal(void);
 BOOL serial_is_open(void);
 
+/* ─── Transport selection ─── */
+#define TRANSPORT_SERIAL 0
+#define TRANSPORT_TCP    1
+
+extern int g_transport_mode;
+
+/* Transport dispatch layer (transport.c) — main.c and callers use these */
+int   transport_open(int mode, ULONG param);   /* param: serial baud OR tcp port */
+void  transport_close(void);
+int   transport_write(const char *buf, int len);
+void  transport_start_read(void);
+int   transport_check_read(char *out_byte);
+ULONG transport_get_signal(void);
+BOOL  transport_is_open(void);
+
+/* TCP/bsdsocket backend (net_io.c) */
+int   net_open(ULONG port);
+void  net_close(void);
+int   net_write(const char *buf, int len);
+int   net_check_read(char *out_byte);
+ULONG net_get_signal(void);
+BOOL  net_is_open(void);
+
 /* ---- ipc_manager.c ---- */
 int ipc_init(void);
 void ipc_cleanup(void);
