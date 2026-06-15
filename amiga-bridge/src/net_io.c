@@ -186,7 +186,7 @@ int net_check_read(char *out_byte)
 int net_write(const char *buf, int len)
 {
     int sent  = 0;
-    int guard = 0;
+    int stall = 0;
 
     if (client_sock < 0) return -1;
 
@@ -194,10 +194,18 @@ int net_write(const char *buf, int len)
         LONG n = send(client_sock, (APTR)(buf + sent), len - sent, 0);
         if (n > 0) {
             sent += (int)n;
+            stall = 0;               /* progress made: reset the stall timer */
         } else if (n < 0 && Errno() == EINTR) {
             continue;                /* interrupted: retry, no penalty */
         } else if (n < 0 && Errno() == EWOULDBLOCK) {
-            if (++guard > 50) { drop_client(); return sent; }  /* ~1s cap */
+            /* Send buffer full. Wait for it to drain instead of dropping the
+             * peer on a brief host-side stall - large transfers (e.g. a
+             * multi-MB true-colour screenshot) routinely back-pressure here.
+             * Only give up after a long *sustained* stall with zero progress,
+             * which means the host has really gone away. The stall counter is
+             * reset above whenever any bytes get through, so a slow-but-moving
+             * link never trips this. */
+            if (++stall > 1500) { drop_client(); return sent; }  /* ~30s cap */
             Delay(1);                /* ~20ms: let the send buffer drain */
         } else {
             drop_client();
