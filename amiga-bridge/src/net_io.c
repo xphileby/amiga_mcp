@@ -37,6 +37,16 @@ static void set_nonblocking(LONG s)
     IoctlSocket(s, FIONBIO, (char *)&one);
 }
 
+/* Enable async (SIGIO) delivery for this socket so the stack signals our task
+ * the instant the socket is readable. Without this, setting SBTC_SIGIOMASK
+ * alone does NOT generate signals, and the daemon only services the socket on
+ * its periodic timer tick (~200ms latency per request). */
+static void set_async(LONG s)
+{
+    LONG one = 1;
+    IoctlSocket(s, FIOASYNC, (char *)&one);
+}
+
 static void drop_client(void)
 {
     if (client_sock >= 0) { CloseSocket(client_sock); client_sock = -1; }
@@ -53,6 +63,7 @@ static void try_accept(void)
         if (client_sock >= 0) CloseSocket(client_sock);   /* drop stale peer */
         client_sock = s;
         set_nonblocking(client_sock);
+        set_async(client_sock);    /* wake the daemon immediately on incoming data */
         rx_len = rx_pos = 0;
         ui_add_log("TCP: client connected");
     }
@@ -106,6 +117,7 @@ int net_open(ULONG port)
         return -1;
     }
     set_nonblocking(listen_sock);
+    set_async(listen_sock);     /* wake immediately on incoming connections */
 
     ui_add_log("TCP: listening");
     return 0;
