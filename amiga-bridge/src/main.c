@@ -28,7 +28,11 @@
 extern struct ExecBase *SysBase;
 struct IntuitionBase *IntuitionBase = NULL;
 struct GfxBase *GfxBase = NULL;
-static struct TextFont *g_ui_font = NULL;   /* topaz 8 for the status window */
+
+/* Layout metrics derived at runtime from the inherited screen font. */
+static int g_line_h   = 12;   /* per-line cell height (font height + leading) */
+static int g_baseline = 8;    /* font baseline offset within the cell */
+static int g_top      = 2;    /* top margin inside the GZZ area */
 
 /* UI state - global, accessed by other modules */
 char g_ui_logs[UI_MAX_LOG_LINES][UI_MAX_LOG_LEN];
@@ -86,64 +90,71 @@ static void close_libs(void)
     }
 }
 
+/* Lines shown: 3 status (Serial/Host/Clients) + log lines + 1 (Msgs). */
+#define UI_NUM_LINES (3 + UI_MAX_LOG_LINES + 1)
+
 static struct Window *open_window(void)
 {
     struct NewWindow nw;
+    struct Window *w;
+    int innerW, innerH, totalW, totalH;
 
     memset(&nw, 0, sizeof(nw));
     nw.LeftEdge = WIN_LEFT;
     nw.TopEdge = WIN_TOP;
     nw.Width = WIN_WIDTH;
-    nw.Height = WIN_HEIGHT;
+    nw.Height = 120;                 /* provisional - resized to fit the font */
     nw.DetailPen = 0;
     nw.BlockPen = 1;
-    nw.Title = (UBYTE *)"AmigaBridge v1.3";
+    nw.Title = (UBYTE *)BRIDGE_VERSION_STR;
     nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET |
                WFLG_ACTIVATE | WFLG_SMART_REFRESH |
                WFLG_GIMMEZEROZERO;
     nw.IDCMPFlags = IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW;
     nw.Type = WBENCHSCREEN;
-    nw.MinWidth = WIN_WIDTH;
-    nw.MinHeight = WIN_HEIGHT;
-    nw.MaxWidth = WIN_WIDTH;
-    nw.MaxHeight = WIN_HEIGHT;
+    nw.MinWidth = 80;   nw.MinHeight = 40;
+    nw.MaxWidth = 2000; nw.MaxHeight = 2000;
 
-    {
-        struct Window *w = OpenWindow(&nw);
-        if (w) {
-            /* Force topaz 8 so glyph height stays under TEXT_LINEH regardless
-             * of the (possibly large) screen font - otherwise lines overlap. */
-            struct TextAttr ta;
-            ta.ta_Name  = (STRPTR)"topaz.font";
-            ta.ta_YSize = 8;
-            ta.ta_Style = FS_NORMAL;
-            ta.ta_Flags = FPF_ROMFONT;
-            g_ui_font = OpenFont(&ta);
-            if (g_ui_font) SetFont(w->RPort, g_ui_font);
-        }
-        return w;
-    }
+    w = OpenWindow(&nw);
+    if (!w) return NULL;
+
+    /* Inherit the screen font and derive the whole layout from its real
+     * metrics, then size the window to fit exactly - no hardcoded font/size. */
+    g_line_h   = w->RPort->TxHeight + 2;     /* font height + leading */
+    g_baseline = w->RPort->TxBaseline;
+    g_top      = 2;
+
+    innerW = (int)TextLength(w->RPort,
+                 (CONST_STRPTR)"Serial: Disconnected   TX:000000", 32) + TEXT_LEFT + 6;
+    innerH = g_top + UI_NUM_LINES * g_line_h + 2;
+    totalW = innerW + w->BorderLeft + w->BorderRight;
+    totalH = innerH + w->BorderTop + w->BorderBottom;
+    ChangeWindowBox(w, w->LeftEdge, w->TopEdge, totalW, totalH);
+    return w;
 }
 
 static void draw_text_line(struct RastPort *rp, int lineNum,
                            const char *text)
 {
-    int x = TEXT_LEFT;
-    int y = TEXT_TOP + lineNum * TEXT_LINEH;
-    int len = strlen(text);
-    int maxChars = 37; /* topaz-8 chars that fit within the cleared width */
+    int y = g_top + lineNum * g_line_h;          /* cell top (GZZ coords) */
+    int availW = (int)win->GZZWidth - TEXT_LEFT - 2;
+    int len = (int)strlen(text);
+    struct TextExtent te;
+    int fit;
 
-    if (len > maxChars) len = maxChars;
-
-    /* Clear the full line cell (right out to the window edge) so a shorter new
-     * line never leaves fragments of a longer previous one. */
+    /* Clear the whole line cell so nothing leaks under or between lines. */
     SetAPen(rp, 0);
-    RectFill(rp, 0, y - 7, WIN_WIDTH - 3, y + 3);
+    RectFill(rp, 0, y, win->GZZWidth - 1, y + g_line_h - 1);
 
-    /* Draw text */
+    if (availW < 1 || len == 0) return;
+
+    /* Truncate to what fits the current width/font (handles proportional). */
+    fit = (int)TextFit(rp, (CONST_STRPTR)text, (ULONG)len, &te, NULL, 1,
+                       (UWORD)availW, (UWORD)g_line_h);
+
     SetAPen(rp, 1);
-    Move(rp, x, y);
-    Text(rp, (CONST_STRPTR)text, len);
+    Move(rp, TEXT_LEFT, y + g_baseline);
+    Text(rp, (CONST_STRPTR)text, fit);
 }
 
 static void ui_redraw(void)
@@ -281,8 +292,8 @@ int main(int argc, char **argv)
         return 20;
     }
 
-    printf("AmigaBridge v1.3 (build %s) starting\n", g_bridge_build);
-    ui_add_log("Starting AmigaBridge v1.3");
+    printf(BRIDGE_VERSION_STR " (build %s) starting\n", g_bridge_build);
+    ui_add_log("Starting " BRIDGE_VERSION_STR);
     {
         static char bld[80];
         sprintf(bld, "Build: %s", g_bridge_build);
@@ -543,10 +554,6 @@ int main(int argc, char **argv)
     if (win) {
         CloseWindow(win);
         win = NULL;
-    }
-    if (g_ui_font) {
-        CloseFont(g_ui_font);
-        g_ui_font = NULL;
     }
 
     close_libs();

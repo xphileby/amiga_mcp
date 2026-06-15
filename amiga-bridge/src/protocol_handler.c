@@ -17,9 +17,7 @@
 
 #include "bridge_internal.h"
 
-/* Version defines */
-#define BRIDGE_VERSION_MAJOR 1
-#define BRIDGE_VERSION_MINOR 3
+/* Version is defined once in bridge_internal.h (BRIDGE_VERSION_MAJOR/MINOR). */
 
 ULONG g_tx_count = 0;
 ULONG g_rx_count = 0;

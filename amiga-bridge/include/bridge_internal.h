@@ -9,6 +9,14 @@
  * chunks and full-width chunky screenshot rows). */
 #define BRIDGE_MAX_LINE 8192
 
+/* Daemon version - bump MAJOR/MINOR here ONLY; everything else derives from it. */
+#define BRIDGE_VERSION_MAJOR 1
+#define BRIDGE_VERSION_MINOR 4
+#define BRIDGE_STR_(x) #x
+#define BRIDGE_STR(x)  BRIDGE_STR_(x)
+#define BRIDGE_VERSION_STR \
+    "AmigaBridge v" BRIDGE_STR(BRIDGE_VERSION_MAJOR) "." BRIDGE_STR(BRIDGE_VERSION_MINOR)
+
 /* Build identity (src/version.c, force-rebuilt each make) */
 extern const char * const g_bridge_build;
 
