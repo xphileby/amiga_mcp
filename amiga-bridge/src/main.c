@@ -28,6 +28,7 @@
 extern struct ExecBase *SysBase;
 struct IntuitionBase *IntuitionBase = NULL;
 struct GfxBase *GfxBase = NULL;
+static struct TextFont *g_ui_font = NULL;   /* topaz 8 for the status window */
 
 /* UI state - global, accessed by other modules */
 char g_ui_logs[UI_MAX_LOG_LINES][UI_MAX_LOG_LEN];
@@ -96,7 +97,7 @@ static struct Window *open_window(void)
     nw.Height = WIN_HEIGHT;
     nw.DetailPen = 0;
     nw.BlockPen = 1;
-    nw.Title = (UBYTE *)"AmigaBridge v1.2";
+    nw.Title = (UBYTE *)"AmigaBridge v1.3";
     nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET |
                WFLG_ACTIVATE | WFLG_SMART_REFRESH |
                WFLG_GIMMEZEROZERO;
@@ -107,7 +108,21 @@ static struct Window *open_window(void)
     nw.MaxWidth = WIN_WIDTH;
     nw.MaxHeight = WIN_HEIGHT;
 
-    return OpenWindow(&nw);
+    {
+        struct Window *w = OpenWindow(&nw);
+        if (w) {
+            /* Force topaz 8 so glyph height stays under TEXT_LINEH regardless
+             * of the (possibly large) screen font - otherwise lines overlap. */
+            struct TextAttr ta;
+            ta.ta_Name  = (STRPTR)"topaz.font";
+            ta.ta_YSize = 8;
+            ta.ta_Style = FS_NORMAL;
+            ta.ta_Flags = FPF_ROMFONT;
+            g_ui_font = OpenFont(&ta);
+            if (g_ui_font) SetFont(w->RPort, g_ui_font);
+        }
+        return w;
+    }
 }
 
 static void draw_text_line(struct RastPort *rp, int lineNum,
@@ -116,13 +131,14 @@ static void draw_text_line(struct RastPort *rp, int lineNum,
     int x = TEXT_LEFT;
     int y = TEXT_TOP + lineNum * TEXT_LINEH;
     int len = strlen(text);
-    int maxChars = 38; /* approx chars that fit in window */
+    int maxChars = 37; /* topaz-8 chars that fit within the cleared width */
 
     if (len > maxChars) len = maxChars;
 
-    /* Clear the line area */
+    /* Clear the full line cell (right out to the window edge) so a shorter new
+     * line never leaves fragments of a longer previous one. */
     SetAPen(rp, 0);
-    RectFill(rp, 0, y - 7, WIN_WIDTH - 20, y + 3);
+    RectFill(rp, 0, y - 7, WIN_WIDTH - 3, y + 3);
 
     /* Draw text */
     SetAPen(rp, 1);
@@ -265,8 +281,8 @@ int main(int argc, char **argv)
         return 20;
     }
 
-    printf("AmigaBridge v1.2 (build %s) starting\n", g_bridge_build);
-    ui_add_log("Starting AmigaBridge v1.2");
+    printf("AmigaBridge v1.3 (build %s) starting\n", g_bridge_build);
+    ui_add_log("Starting AmigaBridge v1.3");
     {
         static char bld[80];
         sprintf(bld, "Build: %s", g_bridge_build);
@@ -527,6 +543,10 @@ int main(int argc, char **argv)
     if (win) {
         CloseWindow(win);
         win = NULL;
+    }
+    if (g_ui_font) {
+        CloseFont(g_ui_font);
+        g_ui_font = NULL;
     }
 
     close_libs();

@@ -19,7 +19,7 @@
 
 /* Version defines */
 #define BRIDGE_VERSION_MAJOR 1
-#define BRIDGE_VERSION_MINOR 2
+#define BRIDGE_VERSION_MINOR 3
 
 ULONG g_tx_count = 0;
 ULONG g_rx_count = 0;
