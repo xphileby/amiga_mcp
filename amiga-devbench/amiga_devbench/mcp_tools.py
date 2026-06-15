@@ -897,7 +897,7 @@ async def amiga_screenshot(window: str = "") -> str:
         else:
             conn.send({"type": "SCREENSHOT"})
 
-        deadline = asyncio.get_event_loop().time() + 30.0
+        deadline = asyncio.get_event_loop().time() + 120.0
         while True:
             remaining = deadline - asyncio.get_event_loop().time()
             if remaining <= 0:
