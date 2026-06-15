@@ -18,7 +18,7 @@ from .state import EventBus
 
 logger = logging.getLogger(__name__)
 
-CHUNK_SIZE = 400        # bytes per chunk (800 hex chars, fits in 1024-char line)
+CHUNK_SIZE = 4000       # bytes per chunk (8000 hex chars, fits in 8192-char line)
 MAX_RETRIES = 3
 CHUNK_TIMEOUT = 5.0
 

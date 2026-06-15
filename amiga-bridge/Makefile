@@ -13,7 +13,8 @@ DAEMON_SRCS = src/main.c src/serial_io.c src/ipc_manager.c \
               src/input_inject.c src/font_browser.c \
               src/chipwrite_logger.c src/pool_tracker.c \
               src/clipboard_bridge.c src/arexx_bridge.c \
-              src/debugger.c src/transport.c src/net_io.c
+              src/debugger.c src/transport.c src/net_io.c \
+              src/version.c
 DAEMON_OBJS = $(DAEMON_SRCS:.c=.o)
 DAEMON_BIN = amiga-bridge
 
@@ -22,7 +23,11 @@ CLIENT_SRCS = client/bridge_client.c
 CLIENT_OBJS = $(CLIENT_SRCS:.c=.o)
 CLIENT_LIB = libbridge.a
 
-.PHONY: all clean daemon client
+.PHONY: all clean daemon client FORCE
+
+# Always rebuild the build-stamp so __DATE__/__TIME__ reflect this build.
+src/version.o: FORCE
+FORCE:
 
 all: daemon client
 

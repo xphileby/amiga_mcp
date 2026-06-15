@@ -133,22 +133,36 @@ def save_screenshot(
     depth = scrinfo["depth"]
     palette = parse_palette(scrinfo["palette"])
 
-    # Organize plane data: planes_data[row][plane] = bytes
-    planes_data: list[list[bytes]] = []
-    for y in range(height):
-        row_planes: list[bytes] = []
-        for p in range(depth):
-            row_planes.append(b"\x00" * ((width + 15) // 16 * 2))
-        planes_data.append(row_planes)
+    # Chunky (RTG / Picasso96) path: rows tagged with plane==255 carry one
+    # pen-index byte per pixel; decode directly instead of planar deinterleaving.
+    chunky_rows = {
+        sd["row"]: bytes.fromhex(sd["hexData"])
+        for sd in scrdata_lines
+        if sd.get("plane") == 255
+    }
+    if chunky_rows:
+        pixel_indices = []
+        for y in range(height):
+            row = chunky_rows.get(y, b"")
+            for x in range(width):
+                pixel_indices.append(row[x] if x < len(row) else 0)
+    else:
+        # Planar path: organize plane data planes_data[row][plane] = bytes
+        planes_data: list[list[bytes]] = []
+        for y in range(height):
+            row_planes: list[bytes] = []
+            for p in range(depth):
+                row_planes.append(b"\x00" * ((width + 15) // 16 * 2))
+            planes_data.append(row_planes)
 
-    for sd in scrdata_lines:
-        row = sd["row"]
-        plane = sd["plane"]
-        hex_data = sd["hexData"]
-        if row < height and plane < depth:
-            planes_data[row][plane] = bytes.fromhex(hex_data)
+        for sd in scrdata_lines:
+            row = sd["row"]
+            plane = sd["plane"]
+            hex_data = sd["hexData"]
+            if row < height and plane < depth:
+                planes_data[row][plane] = bytes.fromhex(hex_data)
 
-    pixel_indices = planar_to_chunky(width, height, depth, planes_data)
+        pixel_indices = planar_to_chunky(width, height, depth, planes_data)
 
     png_data = render_png(width, height, pixel_indices, palette)
 

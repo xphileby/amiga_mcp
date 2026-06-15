@@ -96,7 +96,7 @@ static struct Window *open_window(void)
     nw.Height = WIN_HEIGHT;
     nw.DetailPen = 0;
     nw.BlockPen = 1;
-    nw.Title = (UBYTE *)"AmigaBridge v1.0";
+    nw.Title = (UBYTE *)"AmigaBridge v1.1";
     nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET |
                WFLG_ACTIVATE | WFLG_SMART_REFRESH |
                WFLG_GIMMEZEROZERO;
@@ -265,8 +265,37 @@ int main(int argc, char **argv)
         return 20;
     }
 
-    printf("AmigaBridge v1.0 starting\n");
-    ui_add_log("Starting AmigaBridge...");
+    printf("AmigaBridge v1.1 (build %s) starting\n", g_bridge_build);
+    ui_add_log("Starting AmigaBridge v1.1");
+    {
+        static char bld[80];
+        sprintf(bld, "Build: %s", g_bridge_build);
+        ui_add_log(bld);
+    }
+
+    /* If a previous daemon is already running, ask it to quit and take over,
+     * so simply re-running the binary cleanly replaces the old instance
+     * (enables remote restart without manual intervention). */
+    {
+        struct Task *oldtask = NULL;
+        struct MsgPort *p;
+        int tries;
+        Forbid();
+        p = FindPort((CONST_STRPTR)BRIDGE_PORT_NAME);
+        if (p) oldtask = p->mp_SigTask;
+        Permit();
+        if (oldtask) {
+            ui_add_log("Replacing running AmigaBridge instance...");
+            Signal(oldtask, SIGBREAKF_CTRL_C);
+            for (tries = 0; tries < 30; tries++) {   /* up to ~6s */
+                Forbid();
+                p = FindPort((CONST_STRPTR)BRIDGE_PORT_NAME);
+                Permit();
+                if (!p) break;
+                Delay(10);   /* 0.2s */
+            }
+        }
+    }
 
     /* Initialize IPC */
     if (ipc_init() != 0) {

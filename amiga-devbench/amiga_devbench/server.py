@@ -1158,6 +1158,21 @@ def create_app(args: Any, cfg: DevBenchConfig | None = None) -> Starlette:
                         try:
                             evt, data = await queue.get()
                             logger.info("Bridge READY received: %s", data)
+                            # Surface the running daemon build so it is obvious
+                            # which binary is live after an update.
+                            if _conn and _conn.connected:
+                                try:
+                                    async with _event_bus.subscribe("version") as vq:
+                                        _conn.send({"type": "VERSION"})
+                                        _, vd = await asyncio.wait_for(vq.get(), timeout=3.0)
+                                        logger.warning(
+                                            "*** Connected to %s v%s.%s (build %s) ***",
+                                            vd.get("name", "AmigaBridge"),
+                                            vd.get("major", "?"), vd.get("minor", "?"),
+                                            vd.get("date", "?"),
+                                        )
+                                except Exception:
+                                    pass
                             if _auto_crash and _conn and _conn.connected:
                                 logger.info("Auto-enabling crash handler...")
                                 await asyncio.sleep(0.5)
@@ -5072,11 +5087,14 @@ def _kill_stale_instance() -> None:
     try:
         with open(_PID_FILE) as f:
             old_pid = int(f.read().strip())
-        # Check if process is still running
+        # Check if process is still running. On Windows os.kill(pid, 0) can
+        # raise OSError (WinError 87) or even SystemError for a stale/recycled
+        # PID rather than a clean ProcessLookupError, so treat any failure here
+        # as "not running".
         try:
             os.kill(old_pid, 0)
-        except OSError:
-            return  # Already dead
+        except (OSError, SystemError):
+            return  # Already dead (or not queryable on this platform)
         logger.info("Killing stale devbench process (pid %d)", old_pid)
         os.kill(old_pid, _signal.SIGTERM)
         # Wait briefly for it to die

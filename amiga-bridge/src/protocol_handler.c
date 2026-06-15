@@ -19,7 +19,7 @@
 
 /* Version defines */
 #define BRIDGE_VERSION_MAJOR 1
-#define BRIDGE_VERSION_MINOR 0
+#define BRIDGE_VERSION_MINOR 1
 
 ULONG g_tx_count = 0;
 ULONG g_rx_count = 0;
@@ -569,13 +569,13 @@ void protocol_send_dir(const char *path)
 
 void protocol_send_file(const char *path, ULONG offset, ULONG size)
 {
-    static UBYTE filebuf[450];
+    static UBYTE filebuf[4096];
     ULONG actual = 0;
     int result;
 
-    if (size > 450) size = 450;
+    if (size > 4096) size = 4096;
 
-    result = fs_read_file(path, offset, size, filebuf, 450, &actual);
+    result = fs_read_file(path, offset, size, filebuf, 4096, &actual);
     if (result < 0) {
         send_err("READFILE failed", path);
     } else {
@@ -993,7 +993,7 @@ static void handle_writefile(const char *args)
     /* Format: path|offset|hexdata */
     static char path[256];
     ULONG offset = 0;
-    static UBYTE databuf[450];
+    static UBYTE databuf[4096];
     ULONG datalen = 0;
     const char *sep1;
     const char *sep2;
@@ -1020,7 +1020,7 @@ static void handle_writefile(const char *args)
         ULONG i;
 
         datalen = hexlen / 2;
-        if (datalen > 450) datalen = 450;
+        if (datalen > 4096) datalen = 4096;
 
         for (i = 0; i < datalen; i++) {
             char hb[3];
@@ -2270,7 +2270,7 @@ static void handle_append(const char *args)
     /* Format: path|hexdata */
     const char *sep;
     static char path[256];
-    static UBYTE databuf[450];
+    static UBYTE databuf[4096];
     ULONG datalen = 0;
 
     if (!args || args[0] == '\0') {
@@ -2294,7 +2294,7 @@ static void handle_append(const char *args)
         ULONG i;
 
         datalen = hexlen / 2;
-        if (datalen > 450) datalen = 450;
+        if (datalen > 4096) datalen = 4096;
 
         for (i = 0; i < datalen; i++) {
             char hb[3];
@@ -2320,7 +2320,7 @@ static void handle_version(void)
     sprintf(buf, "VERSION|AmigaBridge|%ld|%ld|%s",
         (long)BRIDGE_VERSION_MAJOR,
         (long)BRIDGE_VERSION_MINOR,
-        __DATE__);
+        g_bridge_build);
     send_line(buf);
 }
 

@@ -911,7 +911,13 @@ async def amiga_screenshot(window: str = "") -> str:
                     expected_total = data["height"] * data["depth"]
                 elif evt == "scrdata":
                     scrdata_msgs.append(data)
-                    if scrinfo_msg and len(scrdata_msgs) >= expected_total:
+                    # Chunky (RTG) rows use plane==255 and send one line per
+                    # row, not one per bitplane.
+                    if data.get("plane") == 255 and scrinfo_msg:
+                        needed = scrinfo_msg["height"]
+                    else:
+                        needed = expected_total
+                    if scrinfo_msg and needed and len(scrdata_msgs) >= needed:
                         break
             except asyncio.TimeoutError:
                 break

@@ -173,6 +173,27 @@ void gfx_handle_screenshot(const char *args)
      * Max hex per line: 80 bytes = 160 hex chars (for 640-wide) */
     bytesPerRow = ((width + 15) / 16) * 2;
 
+    /* RTG / chunky detection: an 8bpp chunky (Picasso96/RTG) bitmap stores one
+     * pen byte per pixel, so BytesPerRow >= width. Planar bitmaps have
+     * BytesPerRow ~= width/8. For chunky we read Planes[0] directly as pen
+     * indices and send each row with plane=255 as a sentinel for the host. */
+    if (depth <= 8 && (ULONG)bm->BytesPerRow >= (ULONG)width && bm->Planes[0]) {
+        static char chunkhex[8200];
+        for (row = 0; row < height; row++) {
+            UWORD srcRow = useClip ? (row + clipTop) : row;
+            UWORD srcX   = useClip ? clipLeft : 0;
+            ULONG rowOffset = (ULONG)srcRow * (ULONG)bm->BytesPerRow + (ULONG)srcX;
+            UBYTE *src = (UBYTE *)bm->Planes[0] + rowOffset;
+            UWORD n = width;
+            if (n > 4000) n = 4000;   /* keep the line under BRIDGE_MAX_LINE */
+            hex_encode(src, (ULONG)n, chunkhex);
+            sprintf(linebuf, "SCRDATA|%ld|255|%s", (long)row, chunkhex);
+            protocol_send_raw(linebuf);
+        }
+        UnlockIBase(lock);
+        return;
+    }
+
     for (row = 0; row < height; row++) {
         for (plane = 0; plane < depth; plane++) {
             UBYTE *planePtr;

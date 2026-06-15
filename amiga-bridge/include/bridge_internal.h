@@ -5,8 +5,12 @@
 #include <exec/ports.h>
 #include "bridge_ipc.h"
 
-/* Maximum protocol line length */
-#define BRIDGE_MAX_LINE 1024
+/* Maximum protocol line length (large enough for ~4KB hex file-transfer
+ * chunks and full-width chunky screenshot rows). */
+#define BRIDGE_MAX_LINE 8192
+
+/* Build identity (src/version.c, force-rebuilt each make) */
+extern const char * const g_bridge_build;
 
 /* ---- serial_io.c ---- */
 int serial_open(ULONG baud);
