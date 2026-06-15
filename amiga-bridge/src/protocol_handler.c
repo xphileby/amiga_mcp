@@ -145,6 +145,7 @@ void protocol_parse_line(const char *line)
 
     g_rx_count++;
     g_host_connected = TRUE;
+    ui_set_last_cmd(line);   /* show every command in the status window */
 
     /* Extract command (before first '|') */
     sep = strchr(line, '|');

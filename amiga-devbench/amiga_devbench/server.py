@@ -1060,6 +1060,24 @@ def create_app(args: Any, cfg: DevBenchConfig | None = None) -> Starlette:
     # Initialize MCP tools with shared state
     init_tools(_conn, _state, _builder, _deployer, _event_bus, fsuae_rpc=_fsuae_rpc)
 
+    # Add an INFO Logs-tab line for EVERY tool call (Claude's via /mcp and the
+    # web UI's). Traffic-view recording already happens in McpLoggingWrapper
+    # (Claude) and the /api/command handler (web UI), so we only add the Logs
+    # entry here to avoid double-recording.
+    _orig_call_tool = mcp._tool_manager.call_tool
+
+    async def _logging_call_tool(name, arguments=None, *a, **kw):
+        params = arguments if isinstance(arguments, dict) else {}
+        argstr = ", ".join(f"{k}={v}" for k, v in params.items())
+        logger.info("MCP tool: %s(%s)", name, argstr)
+        if _state is not None:
+            _state.add_log({"level": "I", "client": "mcp",
+                            "message": f"tool: {name}({argstr})",
+                            "timestamp": time.time()})
+        return await _orig_call_tool(name, arguments, *a, **kw)
+
+    mcp._tool_manager.call_tool = _logging_call_tool
+
     # Get the MCP session manager (triggers lazy init)
     _mcp_app_inner = mcp.streamable_http_app()
     session_manager = mcp._session_manager
@@ -3990,31 +4008,23 @@ def create_app(args: Any, cfg: DevBenchConfig | None = None) -> Starlette:
         try:
             result = await mcp._tool_manager.call_tool(tool_name, args)
             duration = (time.time() - t0) * 1000
-            # Extract text content from result
             resp_text = ""
             for item in result:
                 if hasattr(item, "text"):
                     resp_text += item.text
+            # Traffic record for web-UI-initiated tool calls (Claude's go via
+            # McpLoggingWrapper; the call_tool wrapper only adds the Logs line).
             _traffic.record(
-                kind="mcp",
-                method=tool_name,
-                path=f"mcp://{tool_name}",
-                request_body=args,
-                response_body=resp_text,
+                kind="mcp", method=tool_name, path=f"mcp://{tool_name}",
+                request_body=args, response_body=resp_text,
                 duration_ms=round(duration, 1),
             )
             return JSONResponse({"result": resp_text, "duration_ms": round(duration, 1)})
         except Exception as exc:
-            duration = (time.time() - t0) * 1000
             _traffic.record(
-                kind="mcp",
-                method=tool_name,
-                path=f"mcp://{tool_name}",
-                request_body=args,
-                response_body=None,
-                status=500,
-                duration_ms=round(duration, 1),
-                error=str(exc),
+                kind="mcp", method=tool_name, path=f"mcp://{tool_name}",
+                request_body=args, status=500,
+                duration_ms=round((time.time() - t0) * 1000, 1), error=str(exc),
             )
             return JSONResponse({"error": str(exc)}, status_code=500)
 

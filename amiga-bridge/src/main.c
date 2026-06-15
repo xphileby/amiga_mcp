@@ -34,6 +34,9 @@ static int g_line_h   = 12;   /* per-line cell height (font height + leading) */
 static int g_baseline = 8;    /* font baseline offset within the cell */
 static int g_top      = 2;    /* top margin inside the GZZ area */
 
+/* Last protocol command received from the host (for the status window). */
+char g_last_cmd[80] = "";
+
 /* UI state - global, accessed by other modules */
 char g_ui_logs[UI_MAX_LOG_LINES][UI_MAX_LOG_LEN];
 int g_ui_log_head = 0;
@@ -91,7 +94,7 @@ static void close_libs(void)
 }
 
 /* Lines shown: 3 status (Serial/Host/Clients) + log lines + 1 (Msgs). */
-#define UI_NUM_LINES (3 + UI_MAX_LOG_LINES + 1)
+#define UI_NUM_LINES (3 + UI_MAX_LOG_LINES + 2)  /* status + logs + Msgs + Cmd */
 
 static struct Window *open_window(void)
 {
@@ -196,11 +199,18 @@ static void ui_redraw(void)
         }
     }
 
-    /* Line 8: Message counters */
+    /* Message counters */
     sprintf(linebuf, "Msgs: TX:%lu RX:%lu",
             (unsigned long)g_tx_count,
             (unsigned long)g_rx_count);
-    draw_text_line(rp, 8, linebuf);
+    draw_text_line(rp, 3 + UI_MAX_LOG_LINES, linebuf);
+
+    /* Last command received from the host (every command, not just RunAsync) */
+    {
+        static char cmdline[96];
+        sprintf(cmdline, "Cmd: %s", g_last_cmd[0] ? g_last_cmd : "-");
+        draw_text_line(rp, 3 + UI_MAX_LOG_LINES + 1, cmdline);
+    }
 
     g_ui_dirty = FALSE;
 }
@@ -210,6 +220,15 @@ void ui_add_log(const char *msg)
     strncpy(g_ui_logs[g_ui_log_head], msg, UI_MAX_LOG_LEN - 1);
     g_ui_logs[g_ui_log_head][UI_MAX_LOG_LEN - 1] = '\0';
     g_ui_log_head = (g_ui_log_head + 1) % UI_MAX_LOG_LINES;
+    g_ui_dirty = TRUE;
+}
+
+/* Record the last protocol command for the status window (all commands). */
+void ui_set_last_cmd(const char *cmd)
+{
+    if (!cmd) return;
+    strncpy(g_last_cmd, cmd, sizeof(g_last_cmd) - 1);
+    g_last_cmd[sizeof(g_last_cmd) - 1] = '\0';
     g_ui_dirty = TRUE;
 }
 

@@ -11,7 +11,7 @@
 
 /* Daemon version - bump MAJOR/MINOR here ONLY; everything else derives from it. */
 #define BRIDGE_VERSION_MAJOR 1
-#define BRIDGE_VERSION_MINOR 4
+#define BRIDGE_VERSION_MINOR 5
 #define BRIDGE_STR_(x) #x
 #define BRIDGE_STR(x)  BRIDGE_STR_(x)
 #define BRIDGE_VERSION_STR \
@@ -323,5 +323,6 @@ extern BOOL g_serial_connected;
 extern BOOL g_host_connected;
 
 void ui_add_log(const char *msg);
+void ui_set_last_cmd(const char *cmd);
 
 #endif /* BRIDGE_INTERNAL_H */
