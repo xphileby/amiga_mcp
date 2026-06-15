@@ -358,6 +358,16 @@ def parse_message(line: str) -> dict[str, Any] | None:
             "hexData": parts[3],
         }
 
+    if msg_type == "SCRRGB":
+        # Format: SCRRGB|row|hex_rgb  (true-colour, 3 bytes/pixel)
+        if len(parts) < 3:
+            return None
+        return {
+            "type": "SCRRGB",
+            "row": _int(parts[1]),
+            "hexData": parts[2],
+        }
+
     if msg_type == "PALETTE":
         # Format: PALETTE|depth|r0g0b0,r1g1b1,...
         if len(parts) < 3:

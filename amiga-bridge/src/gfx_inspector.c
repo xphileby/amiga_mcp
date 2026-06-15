@@ -133,6 +133,44 @@ void gfx_handle_screenshot(const char *args)
         height = clipHeight;
     }
 
+    /* The BitMap.Depth field caps at 8 for deep RTG bitmaps, so query the real
+     * depth. A true-colour (>8bpp) RTG screen has no palette - read it as RGB
+     * via cybergraphics ReadPixelArray (RECTFMT_RGB converts BGRA32 -> RGB). */
+    {
+        ULONG realdepth = (ULONG)GetBitMapAttr(bm, BMA_DEPTH);
+        ULONG bpr       = (ULONG)bm->BytesPerRow;
+
+        if (realdepth > 8 && bm->Planes[0] && bpr >= (ULONG)width * 4) {
+            /* True-colour (BGRA32) chunky framebuffer: read 4 bytes/pixel
+             * straight from Planes[0] at the real stride, emit RGB rows. */
+            static UBYTE rgbrow[1360 * 3];
+            static char  rgbhex[1360 * 6 + 16];
+            UWORD w = width;
+            if (w > 1360) w = 1360;
+            sprintf(linebuf, "SCRINFO|%ld|%ld|24|", (long)w, (long)height);
+            protocol_send_raw(linebuf);
+            for (row = 0; row < height; row++) {
+                UWORD srcRow = useClip ? (row + clipTop) : row;
+                UWORD srcX   = useClip ? clipLeft : 0;
+                UBYTE *src = (UBYTE *)bm->Planes[0]
+                             + (ULONG)srcRow * bpr + (ULONG)srcX * 4;
+                UWORD x;
+                for (x = 0; x < w; x++) {
+                    /* BGRA byte order -> RGB */
+                    rgbrow[x * 3 + 0] = src[x * 4 + 2];  /* R */
+                    rgbrow[x * 3 + 1] = src[x * 4 + 1];  /* G */
+                    rgbrow[x * 3 + 2] = src[x * 4 + 0];  /* B */
+                }
+                hex_encode(rgbrow, (ULONG)(w * 3), rgbhex);
+                sprintf(linebuf, "SCRRGB|%ld|%s", (long)row, rgbhex);
+                protocol_send_raw(linebuf);
+            }
+            UnlockIBase(lock);
+            return;
+        }
+        /* else fall through to the 8-bit / planar path */
+    }
+
     numColors = 1;
     for (i = 0; i < depth; i++) numColors <<= 1;
     if (numColors > 256) numColors = 256;

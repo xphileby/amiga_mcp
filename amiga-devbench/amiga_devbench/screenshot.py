@@ -116,10 +116,43 @@ def _render_ppm(
     return header + bytes(data)
 
 
+def _render_rgb_png(width, height, rgb_tuples) -> bytes:
+    """Render a list of (r,g,b) tuples to PNG (PIL) or PPM (fallback)."""
+    try:
+        from PIL import Image
+        img = Image.new("RGB", (width, height))
+        img.putdata(rgb_tuples)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    except ImportError:
+        header = f"P6\n{width} {height}\n255\n".encode("ascii")
+        data = bytearray()
+        for (r, g, b) in rgb_tuples:
+            data.extend((r, g, b))
+        return header + bytes(data)
+
+
+def _write_image(png_data: bytes, save_path: str | None) -> str:
+    """Write PNG/PPM bytes to save_path (or a temp file) and return the path."""
+    ext = ".png" if png_data[:4] == b"\x89PNG" else ".ppm"
+    if save_path:
+        if not save_path.endswith(ext):
+            save_path = save_path.rsplit(".", 1)[0] + ext
+        with open(save_path, "wb") as f:
+            f.write(png_data)
+        return save_path
+    tmp = tempfile.NamedTemporaryFile(prefix="amiga_screenshot_", suffix=ext, delete=False)
+    tmp.write(png_data)
+    tmp.close()
+    return tmp.name
+
+
 def save_screenshot(
     scrinfo: dict[str, Any],
     scrdata_lines: list[dict[str, Any]],
     save_path: str | None = None,
+    rgb_lines: list[dict[str, Any]] | None = None,
 ) -> str:
     """Orchestrate screenshot conversion and save to file.
 
@@ -127,6 +160,7 @@ def save_screenshot(
         scrinfo: Parsed SCRINFO message with width, height, depth, palette.
         scrdata_lines: List of parsed SCRDATA messages.
         save_path: Optional explicit path to save to. If None, uses temp file.
+        rgb_lines: List of parsed SCRRGB messages (true-colour, 3 bytes/pixel).
 
     Returns:
         Path to the saved PNG/PPM file.
@@ -134,6 +168,22 @@ def save_screenshot(
     width = scrinfo["width"]
     height = scrinfo["height"]
     depth = scrinfo["depth"]
+
+    # True-colour (RTG/Picasso96 >8bpp) path: SCRRGB rows carry raw RGB bytes.
+    if rgb_lines:
+        rows = {sd["row"]: bytes.fromhex(sd["hexData"]) for sd in rgb_lines}
+        pixel_indices = []  # reused as flat RGB tuples
+        for y in range(height):
+            row = rows.get(y, b"")
+            for x in range(width):
+                i = x * 3
+                if i + 2 < len(row):
+                    pixel_indices.append((row[i], row[i + 1], row[i + 2]))
+                else:
+                    pixel_indices.append((0, 0, 0))
+        png_data = _render_rgb_png(width, height, pixel_indices)
+        return _write_image(png_data, save_path)
+
     palette = parse_palette(scrinfo["palette"])
 
     # Chunky (RTG / Picasso96) path: rows tagged with plane==255 carry one

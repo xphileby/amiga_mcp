@@ -889,9 +889,10 @@ async def amiga_screenshot(window: str = "") -> str:
 
     scrinfo_msg = None
     scrdata_msgs: list[dict] = []
+    scrrgb_msgs: list[dict] = []
     expected_total = 0
 
-    async with bus.subscribe("scrinfo", "scrdata", "err") as queue:
+    async with bus.subscribe("scrinfo", "scrdata", "scrrgb", "err") as queue:
         if window:
             conn.send({"type": "SCREENSHOT", "window": window})
         else:
@@ -909,6 +910,11 @@ async def amiga_screenshot(window: str = "") -> str:
                 if evt == "scrinfo":
                     scrinfo_msg = data
                     expected_total = data["height"] * data["depth"]
+                elif evt == "scrrgb":
+                    # True-colour (RTG): one RGB row per line.
+                    scrrgb_msgs.append(data)
+                    if scrinfo_msg and len(scrrgb_msgs) >= scrinfo_msg["height"]:
+                        break
                 elif evt == "scrdata":
                     scrdata_msgs.append(data)
                     # Chunky (RTG) rows use plane==255 and send one line per
@@ -925,11 +931,13 @@ async def amiga_screenshot(window: str = "") -> str:
     if not scrinfo_msg:
         return "Timed out waiting for screenshot header"
 
-    if not scrdata_msgs:
+    if not scrdata_msgs and not scrrgb_msgs:
         return f"Got header ({scrinfo_msg['width']}x{scrinfo_msg['height']}x{scrinfo_msg['depth']}) but no pixel data"
 
-    path = save_screenshot(scrinfo_msg, scrdata_msgs)
-    return f"Screenshot saved: {path} ({scrinfo_msg['width']}x{scrinfo_msg['height']}, {scrinfo_msg['depth']} planes, {len(scrdata_msgs)} rows received)"
+    path = save_screenshot(scrinfo_msg, scrdata_msgs, rgb_lines=scrrgb_msgs or None)
+    rows = len(scrrgb_msgs) if scrrgb_msgs else len(scrdata_msgs)
+    kind = "truecolor" if scrrgb_msgs else f"{scrinfo_msg['depth']} planes"
+    return f"Screenshot saved: {path} ({scrinfo_msg['width']}x{scrinfo_msg['height']}, {kind}, {rows} rows received)"
 
 
 # ─── Palette Tools ───

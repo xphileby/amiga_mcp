@@ -96,7 +96,7 @@ static struct Window *open_window(void)
     nw.Height = WIN_HEIGHT;
     nw.DetailPen = 0;
     nw.BlockPen = 1;
-    nw.Title = (UBYTE *)"AmigaBridge v1.1";
+    nw.Title = (UBYTE *)"AmigaBridge v1.2";
     nw.Flags = WFLG_CLOSEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET |
                WFLG_ACTIVATE | WFLG_SMART_REFRESH |
                WFLG_GIMMEZEROZERO;
@@ -265,8 +265,8 @@ int main(int argc, char **argv)
         return 20;
     }
 
-    printf("AmigaBridge v1.1 (build %s) starting\n", g_bridge_build);
-    ui_add_log("Starting AmigaBridge v1.1");
+    printf("AmigaBridge v1.2 (build %s) starting\n", g_bridge_build);
+    ui_add_log("Starting AmigaBridge v1.2");
     {
         static char bld[80];
         sprintf(bld, "Build: %s", g_bridge_build);
