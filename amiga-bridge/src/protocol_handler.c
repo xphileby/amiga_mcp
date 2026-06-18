@@ -8,6 +8,7 @@
 #include <exec/types.h>
 #include <exec/memory.h>
 #include <dos/dos.h>
+#include <dos/dostags.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 
@@ -1600,78 +1601,110 @@ static void handle_stop(const char *args)
     }
 }
 
+/* Sentinel echoed after a script completes; the host polls the capture file
+ * for it. Must match SCRIPT_SENTINEL in amiga-devbench's mcp_tools.py. */
+#define SCRIPT_SENTINEL "###ABDONE###"
+
 static void handle_script(const char *args)
 {
     /* Format: id|script_text
-     * Writes script to T:ab_script_<id>, makes it executable,
-     * runs it via proc_launch, captures output. */
+     *
+     * Runs the script ASYNCHRONOUSLY (SYS_Asynch) so the daemon's main loop
+     * is NEVER blocked while a command executes - a slow or hung command can
+     * no longer freeze the bridge. Output is captured to T:ab_sout_<id>; a
+     * sentinel line is echoed at the end (guarded by "FailAt" so a non-zero
+     * return code can't abort the script before the sentinel runs). We reply
+     * immediately with "ASYNC|<capture-file>"; the host polls that file for
+     * the sentinel to know the command finished and to read its output. */
     ULONG cmdId;
     const char *sep;
     char scriptPath[64];
-    static char resultBuf[512];
-    int result;
-    BPTR fh;
+    char outPath[64];
+    static char respBuf[128];
+    BPTR fh, outFh, nilFh;
+    struct Process *pr;
+    APTR oldWin;
+    LONG rc;
 
     if (!args || args[0] == '\0') {
         send_err("SCRIPT", "needs id|script_text");
         return;
     }
-
     sep = strchr(args, '|');
     if (!sep) {
         send_err("SCRIPT", "needs id|script_text");
         return;
     }
-
     cmdId = strtoul(args, NULL, 10);
 
-    /* Write script to temp file */
     sprintf(scriptPath, "T:ab_script_%lu", (unsigned long)cmdId);
+    sprintf(outPath, "T:ab_sout_%lu", (unsigned long)cmdId);
+
     fh = Open((CONST_STRPTR)scriptPath, MODE_NEWFILE);
     if (!fh) {
         protocol_send_cmd_response(cmdId, "ERR", "Cannot create script file");
         return;
     }
 
-    /* Write script content - convert semicolons back to newlines */
+    /* FailAt so a failing command can't abort Execute before the sentinel. */
+    Write(fh, (APTR)"FailAt 255\n", 11);
     {
         const char *src = sep + 1;
         int len = strlen(src);
-        /* Use stack buffer for small scripts, or just write directly */
-        if (len < 480) {
-            static char tmpBuf[480];
-            int i;
-            memcpy(tmpBuf, src, len);
-            for (i = 0; i < len; i++) {
-                if (tmpBuf[i] == ';') tmpBuf[i] = '\n';
-            }
-            /* Ensure trailing newline */
-            if (len > 0 && tmpBuf[len - 1] != '\n') {
-                tmpBuf[len] = '\n';
-                len++;
-            }
-            Write(fh, (APTR)tmpBuf, (LONG)len);
-        } else {
-            Write(fh, (APTR)src, (LONG)len);
+        static char tmpBuf[480];
+        int i;
+        if (len > 479) len = 479;
+        memcpy(tmpBuf, src, len);
+        for (i = 0; i < len; i++) {
+            if (tmpBuf[i] == ';') tmpBuf[i] = '\n';
         }
+        Write(fh, (APTR)tmpBuf, (LONG)len);
+        if (len == 0 || tmpBuf[len - 1] != '\n') Write(fh, (APTR)"\n", 1);
     }
+    /* Completion sentinel - its own output lands in the capture file. */
+    Write(fh, (APTR)("Echo " SCRIPT_SENTINEL "\n"),
+          (LONG)(5 + sizeof(SCRIPT_SENTINEL) - 1 + 1));
     Close(fh);
 
-    /* Run the script via Execute or proc_launch */
+    pr = (struct Process *)FindTask(NULL);
+    oldWin = pr->pr_WindowPtr;
+    pr->pr_WindowPtr = (APTR)-1;        /* suppress requesters */
+
+    outFh = Open((CONST_STRPTR)outPath, MODE_NEWFILE);
+    nilFh = Open((CONST_STRPTR)"NIL:", MODE_OLDFILE);
+    if (!outFh) {
+        pr->pr_WindowPtr = oldWin;
+        if (nilFh) Close(nilFh);
+        DeleteFile((CONST_STRPTR)scriptPath);
+        protocol_send_cmd_response(cmdId, "ERR", "Cannot create output file");
+        return;
+    }
+
     {
         char runCmd[80];
         sprintf(runCmd, "Execute %s", scriptPath);
-        result = proc_launch(cmdId, runCmd, resultBuf, 512);
+        rc = SystemTags((CONST_STRPTR)runCmd,
+                        SYS_Output, (ULONG)outFh,
+                        SYS_Input,  (ULONG)nilFh,
+                        SYS_Asynch, TRUE,
+                        NP_StackSize, 16384,
+                        TAG_DONE);
+    }
+    pr->pr_WindowPtr = oldWin;
+
+    if (rc == -1) {
+        /* Async launch failed: the handles are still ours to close. */
+        if (outFh) Close(outFh);
+        if (nilFh) Close(nilFh);
+        DeleteFile((CONST_STRPTR)scriptPath);
+        protocol_send_cmd_response(cmdId, "ERR", "Script launch failed");
+        return;
     }
 
-    /* Clean up script file */
-    DeleteFile((CONST_STRPTR)scriptPath);
-
-    if (result < 0) {
-        protocol_send_cmd_response(cmdId, "ERR", "Script execution failed");
-    } else {
-        protocol_send_cmd_response(cmdId, "OK", resultBuf);
-    }
+    /* Success: the system owns outFh/nilFh now and closes them when the async
+     * Execute exits (which flushes the sentinel). Report the capture path. */
+    sprintf(respBuf, "ASYNC|%s", outPath);
+    protocol_send_cmd_response(cmdId, "OK", respBuf);
 }
 
 static void handle_writemem(const char *args)

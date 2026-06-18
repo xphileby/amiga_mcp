@@ -713,29 +713,16 @@ async def api_script(request: Request) -> JSONResponse:
     script = body.get("script", "")
     if not script:
         return JSONResponse({"error": "Missing script"}, status_code=400)
-    cmd_id = int(time.time() * 1000) % 100000
     # Convert newlines to semicolons for the protocol
     script_line = script.replace("\n", ";")
-    async with _event_bus.subscribe("cmd") as queue:
-        try:
-            _conn.send({"type": "SCRIPT", "id": cmd_id, "script": script_line})
-        except Exception as e:
-            return JSONResponse({"error": str(e)})
-        deadline = asyncio.get_event_loop().time() + 30.0
-        while True:
-            remaining = deadline - asyncio.get_event_loop().time()
-            if remaining <= 0:
-                break
-            try:
-                evt, data = await asyncio.wait_for(queue.get(), timeout=remaining)
-                if data.get("id") == cmd_id:
-                    return JSONResponse({
-                        "status": data["status"],
-                        "output": data.get("data", ""),
-                    })
-            except asyncio.TimeoutError:
-                break
-    return JSONResponse({"status": "timeout", "output": "Script execution timed out"})
+    # Runs asynchronously on the Amiga (bridge stays responsive); shared helper
+    # polls the capture file for completion.
+    from .mcp_tools import script_execute
+    try:
+        status, output = await script_execute(_conn, _event_bus, script_line, timeout=60.0)
+    except Exception as e:
+        return JSONResponse({"error": str(e)})
+    return JSONResponse({"status": status, "output": output})
 
 
 async def api_write_memory(request: Request) -> JSONResponse:
@@ -3364,28 +3351,25 @@ def create_app(args: Any, cfg: DevBenchConfig | None = None) -> Starlette:
 
     # ---- Helper: run SCRIPT command and get output ----
     async def _run_script(script: str, timeout: float = 10.0) -> tuple[str | None, str | None]:
-        """Run a SCRIPT command and return (output, error). One will be None."""
+        """Run a SCRIPT command and return (output, error). One will be None.
+
+        Uses the shared async helper: the script runs without blocking the
+        bridge and its capture file is polled for completion.
+        """
         if not _conn or not _conn.connected:
             return None, "Not connected"
-        import time as _time
-        cmd_id = int(_time.time() * 1000) % 100000
-        async with _event_bus.subscribe("cmd", "err") as q:
-            _conn.send({"type": "SCRIPT", "id": cmd_id, "script": script})
-            try:
-                deadline = asyncio.get_event_loop().time() + timeout
-                while True:
-                    remaining = deadline - asyncio.get_event_loop().time()
-                    if remaining <= 0:
-                        return None, "Timeout"
-                    evt, data = await asyncio.wait_for(q.get(), timeout=remaining)
-                    if evt == "err":
-                        return None, data.get("message", "Error")
-                    if evt == "cmd" and data.get("id") == cmd_id:
-                        output = data.get("data", "")
-                        output = output.replace(";", "\n")
-                        return output, None
-            except asyncio.TimeoutError:
-                return None, "Timeout"
+        from .mcp_tools import script_execute
+        status, output = await script_execute(_conn, _event_bus, script, timeout=timeout)
+        if status == "ok":
+            return output, None
+        if status == "running":
+            # Past the (short) web timeout but bridge is fine; return partial.
+            return output, None
+        if status == "error":
+            return None, output or "Error"
+        if status == "disconnected":
+            return None, "Not connected"
+        return None, "Timeout"
 
     # ---- Assign Manager ----
     async def api_tool_assigns(request: Request) -> JSONResponse:
