@@ -90,6 +90,10 @@ void chiplog_cleanup(void)
  */
 void chiplog_handle_start(void)
 {
+#ifdef __PPC__
+    /* Custom chip registers at $DFF000 - not advertised on OS4. */
+    protocol_send_raw("ERR|Unknown command|CHIPLOGSTART");
+#else
     /* Take initial snapshot */
     read_all_regs(g_prev);
     g_tick = 0;
@@ -97,6 +101,7 @@ void chiplog_handle_start(void)
 
     protocol_send_raw("OK|CHIPLOG|started");
     ui_add_log("ChipLog: monitoring started");
+#endif
 }
 
 /*
@@ -107,10 +112,15 @@ void chiplog_handle_start(void)
  */
 void chiplog_handle_stop(void)
 {
+#ifdef __PPC__
+    /* Custom chip registers at $DFF000 - not advertised on OS4. */
+    protocol_send_raw("ERR|Unknown command|CHIPLOGSTOP");
+#else
     g_active = FALSE;
 
     protocol_send_raw("OK|CHIPLOG|stopped");
     ui_add_log("ChipLog: monitoring stopped");
+#endif
 }
 
 /*
@@ -121,6 +131,10 @@ void chiplog_handle_stop(void)
  */
 void chiplog_handle_snapshot(void)
 {
+#ifdef __PPC__
+    /* Custom chip registers at $DFF000 - not advertised on OS4. */
+    protocol_send_raw("ERR|Unknown command|CHIPLOGSNAPSHOT");
+#else
     static char linebuf[BRIDGE_MAX_LINE];
     UWORD values[NUM_REGS];
     int pos, i;
@@ -145,6 +159,7 @@ void chiplog_handle_snapshot(void)
     linebuf[pos] = '\0';
 
     protocol_send_raw(linebuf);
+#endif
 }
 
 /*
