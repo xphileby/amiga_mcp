@@ -12,7 +12,7 @@ CFLAGS  ?= -std=c99 -Wall -Wextra -Wpedantic -O2 -g \
 LDFLAGS ?=
 
 # Extracted pure-C sources under test.
-SRCS = ../src/script_util.c test_bridge.c
+SRCS = ../src/script_util.c ../src/caps_util.c test_bridge.c
 OBJS = $(SRCS:.c=.o)
 
 TEST_BIN = test_bridge
