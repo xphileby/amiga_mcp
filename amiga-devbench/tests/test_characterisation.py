@@ -97,7 +97,7 @@ def test_mcp_tool_registration_golden():
     from amiga_devbench.mcp_tools import mcp
 
     expected = (FIXTURES / "mcp_tools_v94a8888.txt").read_text().split()
-    assert len(expected) == 129
+    assert len(expected) == 130
     actual = sorted(t.name for t in asyncio.run(mcp.list_tools()))
     assert set(actual) - set(expected) == set(), "tools added"
     assert set(expected) - set(actual) == set(), "tools removed"
