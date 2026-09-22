@@ -65,6 +65,7 @@ amiga_get_var
 amiga_input_click
 amiga_input_key
 amiga_input_mouse_move
+amiga_input_pointer_pos
 amiga_inspect_memory
 amiga_install_lha
 amiga_last_crash

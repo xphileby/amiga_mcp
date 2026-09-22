@@ -826,7 +826,7 @@ host treats a level above 2 as level 2 and ignores any further fields.
 
 | Field | Meaning |
 |---|---|
-| `commands` | The verbs this build actually performs. The 68k build lists 120 (including the debugger verbs `DBGATTACH`, `BPSET`, ...); the PPC/OS4 build omits every verb it cannot perform (debugger, crash handler, snoop, pool tracker, `READREGS`, `CHIPREGS`, `CHIPLOG*`, `SPRITES`, `COPPERLIST`, `AUDIOCHANNELS`, `AUDIOSAMPLE`, `LIBFUNCS`). An unadvertised verb answers `ERR\|Unknown command\|<VERB>`. |
+| `commands` | The verbs this build actually performs. The 68k build lists 121 as of v1.22 (including the debugger verbs `DBGATTACH`, `BPSET`, ...); the PPC/OS4 build omits every verb it cannot perform (debugger, crash handler, snoop, pool tracker, `READREGS`, `CHIPREGS`, `CHIPLOG*`, `SPRITES`, `COPPERLIST`, `AUDIOCHANNELS`, `AUDIOSAMPLE`, `LIBFUNCS`). An unadvertised verb answers `ERR\|Unknown command\|<VERB>`. |
 | `platform` | `amiga/aos3/unknown` (68k) or `amiga/aos4/unknown` (PPC); the third segment is reserved for the machine model. |
 | `features` | Dotted flags for behaviours that are not a single verb, e.g. `exec.async` (RUN returns before the program does), `fs.tail`, `gfx.truecolor`, `mem.regs` (READREGS), `dbg.crash` (LASTCRASH), `amiga.chipset` (CHIPREGS/CHIPLOG*/SPRITES). The full list with meanings is in `amiga-bridge/src/caps_util.c`. |
 | `profiles` | Named command sets implemented in full: `core,mem,fs,exec,gfx,input,debug,client` on 68k; PPC has no `debug`. Membership is listed in `amiga-bridge/src/caps_util.c`. |
@@ -1334,7 +1334,8 @@ line changes, and crash reports include symbolic register annotations and stack 
 | Tool | Parameters | Description |
 |---|---|---|
 | `amiga_input_key` | `rawkey`, `direction?` | Inject a keyboard event via input.device (raw key code) |
-| `amiga_input_mouse_move` | `dx`, `dy` | Inject a relative mouse move event |
+| `amiga_input_mouse_move` | `dx`, `dy` | Inject a relative mouse move event (goes through Input Prefs acceleration) |
+| `amiga_input_pointer_pos` | `x`, `y` | Put the pointer at an absolute screen position, exact (v1.22+, `INPUTPOS`) |
 | `amiga_input_click` | `button?`, `direction?` | Inject a mouse button press/release |
 
 ### ARexx
