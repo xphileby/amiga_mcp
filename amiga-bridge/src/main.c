@@ -28,6 +28,9 @@
 
 #include "bridge_internal.h"
 
+/* Late transport open: re-try every N timer ticks (200 ms each) = 5 s */
+#define TRANSPORT_RETRY_TICKS 25
+
 #ifndef __PPC__
 extern struct ExecBase *SysBase;
 struct IntuitionBase *IntuitionBase = NULL;
@@ -349,6 +352,8 @@ int main(int argc, char **argv)
     int   sel_mode  = TRANSPORT_SERIAL;
     ULONG sel_param = 115200;
 #endif
+    BOOL  transport_pending = FALSE;   /* open failed at start, retry on timer */
+    int   transport_retry_ticks = 0;
     if (argc >= 2 && (strcmp(argv[1], "TCP") == 0 || strcmp(argv[1], "tcp") == 0)) {
         ULONG tcp_port = 2345;
         if (argc >= 3) {
@@ -432,8 +437,15 @@ int main(int argc, char **argv)
 
     /* Open the selected transport (serial.device or TCP/bsdsocket) */
     if (transport_open(sel_mode, sel_param) != 0) {
-        printf("  Transport: FAILED\n");
-        ui_add_log("ERR: Cannot open transport");
+        /* Typical cause in TCP mode: started from User-Startup before the
+         * TCP/IP stack (Miami/Roadshow) is up, so bsdsocket.library is not
+         * there yet. Do not give up: the timer tick below re-tries the open
+         * every TRANSPORT_RETRY_TICKS until it succeeds. */
+        printf("  Transport: not available yet, will retry\n");
+        ui_add_log(sel_mode == TRANSPORT_TCP
+                   ? "TCP: stack not ready - retrying every 5 s"
+                   : "Transport not ready - retrying every 5 s");
+        transport_pending = TRUE;
         g_serial_connected = FALSE;
     } else {
         printf("  Transport: OK\n");
@@ -593,6 +605,30 @@ int main(int argc, char **argv)
             phase_set("timer");
             /* Collect the timer message */
             GetMsg(timerPort);
+
+            /* Late transport open: the TCP/IP stack was not up when we
+             * started. Re-try every TRANSPORT_RETRY_TICKS (5 s at 200 ms). */
+            if (transport_pending && ++transport_retry_ticks >= TRANSPORT_RETRY_TICKS) {
+                transport_retry_ticks = 0;
+                phase_set("transport_retry");
+                if (transport_open(sel_mode, sel_param) == 0) {
+                    static char title2[96];
+                    transport_pending = FALSE;
+                    transport_start_read();
+                    serialSig = transport_get_signal();
+                    ui_add_log("Transport up after retry");
+                    if (sel_mode == TRANSPORT_TCP) {
+                        snprintf(title2, sizeof(title2),
+                                 "%s  -  TCP :%lu (bsdsocket)",
+                                 BRIDGE_VERSION_STR, (unsigned long)sel_param);
+                    } else {
+                        snprintf(title2, sizeof(title2),
+                                 "%s  -  Serial unit 0 @ %lu baud",
+                                 BRIDGE_VERSION_STR, (unsigned long)sel_param);
+                    }
+                    SetWindowTitles(win, (STRPTR)title2, (STRPTR)~0);
+                }
+            }
 
             /* Drain snoop ring buffer */
             if (g_serial_connected && snoop_is_active()) {
